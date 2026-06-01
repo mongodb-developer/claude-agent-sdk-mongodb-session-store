@@ -27,6 +27,7 @@ classifiers = [
 keywords = ["claude", "ai", "sdk", "anthropic", "mongodb", "session-store"]
 dependencies = [
     "claude-agent-sdk>=0.1.65",
+    "pymongo>=4.13",
 ]
 
 [tool.hatch.build.targets.wheel]
