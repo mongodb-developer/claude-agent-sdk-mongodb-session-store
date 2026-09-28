@@ -1,22 +1,19 @@
-"""MongoDB-backed :class:`~claude_agent_sdk.SessionStore` reference adapter.
+"""MongoDB-backed :class:`~claude_agent_sdk.SessionStore`.
 
-This is a **reference implementation** demonstrating that the
-:class:`~claude_agent_sdk.SessionStore` protocol generalizes to a document
-store. It is not shipped as part of the SDK; copy it into your project and
-adapt as needed (add migrations, sharding, retention sweeps, etc.). This
-mirrors the ``MongoDBSessionStore`` reference implementation from the
-TypeScript SDK.
+Originally contributed as a reference adapter in
+anthropics/claude-agent-sdk-python#1014. It mirrors the
+``MongoDBSessionStore`` reference implementation from the TypeScript SDK.
 
 Requires ``pymongo>=4.13`` (the stable async API). Install with::
 
-    pip install pymongo
+    uv add claude-agent-sdk-mongodb-session-store
 
 Usage::
 
     from pymongo import AsyncMongoClient
     from claude_agent_sdk import ClaudeAgentOptions, query
 
-    from mongodb_session_store import MongoDBSessionStore
+    from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
     client = AsyncMongoClient("mongodb://localhost:27017")
     store = MongoDBSessionStore(client=client, db_name="claude")
@@ -93,12 +90,8 @@ from claude_agent_sdk import (
     SessionStoreEntry,
     SessionStoreListEntry,
     SessionSummaryEntry,
+    fold_session_summary,
 )
-
-# fold_session_summary lives under _internal but is treated as a public
-# surface for SessionStore adapters (the protocol's docstrings reference it).
-# Keep the import in one place so a future relocation is a single-line fix.
-from claude_agent_sdk._internal.session_summary import fold_session_summary
 
 if TYPE_CHECKING:
     from pymongo import AsyncMongoClient

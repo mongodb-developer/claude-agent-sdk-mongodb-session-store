@@ -1,4 +1,4 @@
-"""Live-MongoDB tests for the example ``MongoDBSessionStore`` adapter.
+"""Live-MongoDB tests for ``MongoDBSessionStore``.
 
 There is no in-process MongoDB mock that faithfully exercises aggregation
 and ``distinct``, so this module is **live-only**: it skips unless
@@ -9,27 +9,19 @@ Run locally::
 
     docker run -d -p 27017:27017 mongo:latest
     SESSION_STORE_MONGODB_URL=mongodb://localhost:27017 \\
-        pytest tests/test_example_mongodb_session_store.py -v
+        uv run pytest tests/test_mongodb_session_store.py -v
 """
 
 from __future__ import annotations
 
-import importlib.util
 import itertools
 import json
 import os
-import sys
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-
-# The example adapter and these tests are optional — skip the whole module
-# if the [examples] dependency group isn't installed.
-pymongo = pytest.importorskip(
-    "pymongo", reason="pymongo not installed (pip install .[examples])"
-)
 
 
 @pytest.fixture
@@ -60,26 +52,10 @@ from claude_agent_sdk._internal.transcript_mirror_batcher import (  # noqa: E402
     TranscriptMirrorBatcher,
 )
 from claude_agent_sdk.testing import run_session_store_conformance  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Import the example adapter without polluting sys.path globally.
-# ---------------------------------------------------------------------------
-
-_EXAMPLE_PATH = (
-    Path(__file__).parent.parent
-    / "examples"
-    / "session_stores"
-    / "mongodb_session_store.py"
+from claude_agent_sdk_mongodb_session_store import (  # noqa: E402
+    MongoDBSessionStore,
+    MongoDBSessionStoreOptions,
 )
-_spec = importlib.util.spec_from_file_location(
-    "_mongodb_session_store_example", _EXAMPLE_PATH
-)
-assert _spec is not None and _spec.loader is not None
-_module = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = _module
-_spec.loader.exec_module(_module)
-MongoDBSessionStore = _module.MongoDBSessionStore
-MongoDBSessionStoreOptions = _module.MongoDBSessionStoreOptions
 
 
 SESSION_ID = "550e8400-e29b-41d4-a716-446655440000"
