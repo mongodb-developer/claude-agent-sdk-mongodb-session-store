@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-agent-sdk-mongodb-session-store"
+version = "0.1.0"
+description = "MongoDB-backed SessionStore for the Claude Agent SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Casey Clements", email = "casey.clements@mongodb.com" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+keywords = ["claude", "ai", "sdk", "anthropic", "mongodb", "session-store"]
+dependencies = [
+    "claude-agent-sdk>=0.1.65",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_agent_sdk_mongodb_session_store"]
