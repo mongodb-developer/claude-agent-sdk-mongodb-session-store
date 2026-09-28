@@ -76,7 +76,6 @@ transcripts under ``CLAUDE_CONFIG_DIR`` are swept independently by the CLI's
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -91,16 +90,12 @@ from claude_agent_sdk import (
     SessionSummaryEntry,
     fold_session_summary,
 )
+from pymongo.errors import InvalidName
 
 if TYPE_CHECKING:
     from pymongo import AsyncMongoClient
     from pymongo.asynchronous.collection import AsyncCollection
     from pymongo.asynchronous.database import AsyncDatabase
-
-#: Conservative collection-name guard. Mongo allows ``.`` for namespacing but
-#: ``$`` and null bytes are invalid; reject anything that isn't a plain
-#: ``[A-Za-z_][A-Za-z0-9_.]*`` to head off injection-like footguns.
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
 #: Sentinel used in entry documents to mark the main transcript. The SDK
 #: never emits an empty subpath; treating ``key.get("subpath") or ""`` as the
@@ -121,12 +116,12 @@ class MongoDBSessionStoreOptions:
     one named in the connection URI) when ``None``."""
 
     entries_collection: str = "claude_session_entries"
-    """Collection name for transcript entries. Must match
-    ``[A-Za-z_][A-Za-z0-9_.]*``."""
+    """Collection name for transcript entries. Any name MongoDB accepts,
+    except the reserved ``system.`` namespace."""
 
     summaries_collection: str = "claude_session_summaries"
-    """Collection name for the per-session summary sidecar. Must match
-    ``[A-Za-z_][A-Za-z0-9_.]*``."""
+    """Collection name for the per-session summary sidecar. Any name MongoDB
+    accepts, except the reserved ``system.`` namespace."""
 
 
 class MongoDBSessionStore(SessionStore):
@@ -162,25 +157,34 @@ class MongoDBSessionStore(SessionStore):
             summaries_collection = options.summaries_collection
         if client is None:
             raise ValueError("MongoDBSessionStore requires 'client'")
-        for label, name in (
-            ("entries_collection", entries_collection),
-            ("summaries_collection", summaries_collection),
-        ):
-            if not _IDENT_RE.match(name):
-                raise ValueError(f"{label} {name!r} must match [A-Za-z_][A-Za-z0-9_.]*")
 
         self._db: AsyncDatabase[dict[str, Any]] = (
             client[db_name] if db_name is not None else client.get_default_database()
         )
-        self._entries: AsyncCollection[dict[str, Any]] = self._db[entries_collection]
-        self._summaries: AsyncCollection[dict[str, Any]] = self._db[
-            summaries_collection
-        ]
+        self._entries = self._collection("entries_collection", entries_collection)
+        self._summaries = self._collection("summaries_collection", summaries_collection)
         # Per-session locks for the read-fold-write summary update. Keys are
         # (project_key, session_id); locks are created lazily and never
         # garbage-collected — this is reference code, not a long-running
         # service.
         self._summary_locks: dict[tuple[str, str], anyio.Lock] = {}
+
+    def _collection(self, label: str, name: str) -> AsyncCollection[dict[str, Any]]:
+        """Return collection ``name``, raising ``ValueError`` if it is invalid.
+
+        MongoDB collection names are not an injection vector, so validation
+        is delegated to pymongo (which rejects empty names, ``$``, null bytes,
+        and leading, trailing, or doubled ``.``). The only extra rule is the
+        reserved ``system.`` namespace, which pymongo accepts.
+        """
+        if name.startswith("system."):
+            raise ValueError(
+                f"{label} {name!r} is invalid: the 'system.' prefix is reserved"
+            )
+        try:
+            return self._db[name]
+        except InvalidName as e:
+            raise ValueError(f"{label} {name!r} is invalid: {e}") from e
 
     def _summary_lock(self, key: SessionKey) -> anyio.Lock:
         slot = (key["project_key"], key["session_id"])

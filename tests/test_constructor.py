@@ -68,14 +68,30 @@ class TestConstructor:
 
 class TestCollectionNames:
     @pytest.mark.anyio
-    async def test_rejects_unsafe_collection_name(self, offline_client: Client) -> None:
-        with pytest.raises(ValueError, match="must match"):
-            MongoDBSessionStore(
-                client=offline_client,
-                entries_collection="bad; drop",
-            )
-        with pytest.raises(ValueError, match="must match"):
-            MongoDBSessionStore(
-                client=offline_client,
-                summaries_collection="bad$col",
-            )
+    @pytest.mark.parametrize(
+        "name",
+        ["", "a..b", "x.", ".x", "bad$col", "nul\x00", "system.foo", "system.users"],
+    )
+    @pytest.mark.parametrize("field", ["entries_collection", "summaries_collection"])
+    async def test_rejects_invalid_collection_name(
+        self, offline_client: Client, field: str, name: str
+    ) -> None:
+        # Always ValueError (never pymongo's InvalidName), naming the field.
+        with pytest.raises(ValueError, match=field):
+            MongoDBSessionStore(client=offline_client, db_name="db", **{field: name})
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "name", ["ok", "ns.sub", "with space", "semi;colon", "Ünï"]
+    )
+    async def test_accepts_names_mongodb_allows(
+        self, offline_client: Client, name: str
+    ) -> None:
+        store = MongoDBSessionStore(
+            client=offline_client,
+            db_name="db",
+            entries_collection=name,
+            summaries_collection=f"{name}_s",
+        )
+        assert store._entries.name == name
+        assert store._summaries.name == f"{name}_s"
