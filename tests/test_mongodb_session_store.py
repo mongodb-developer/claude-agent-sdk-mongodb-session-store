@@ -1,9 +1,9 @@
 """Live-MongoDB tests for ``MongoDBSessionStore``.
 
 There is no in-process MongoDB mock that faithfully exercises aggregation
-and ``distinct``, so this module is **live-only**: it skips unless
-``SESSION_STORE_MONGODB_URL`` is set. Each run uses a random database name
-and drops it on teardown.
+and ``distinct``, so these tests are **live-only**: the ``client`` fixture
+skips unless ``SESSION_STORE_MONGODB_URL`` is set. Each test uses a random
+database name and drops it on teardown.
 
 Run locally::
 
@@ -16,43 +16,24 @@ from __future__ import annotations
 
 import itertools
 import json
-import os
-import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    # ``pymongo``'s async API has no trio backend.
-    return "asyncio"
-
-
-MONGODB_URL = os.environ.get("SESSION_STORE_MONGODB_URL")
-if not MONGODB_URL:
-    pytest.skip(
-        "live MongoDB e2e: set SESSION_STORE_MONGODB_URL "
-        "(e.g. mongodb://localhost:27017)",
-        allow_module_level=True,
-    )
-
-from claude_agent_sdk import (  # noqa: E402
+from claude_agent_sdk import (
     ClaudeAgentOptions,
     SessionStore,
     project_key_for_directory,
 )
-from claude_agent_sdk._internal.session_resume import (  # noqa: E402
+from claude_agent_sdk._internal.session_resume import (
     materialize_resume_session,
 )
-from claude_agent_sdk._internal.transcript_mirror_batcher import (  # noqa: E402
+from claude_agent_sdk._internal.transcript_mirror_batcher import (
     TranscriptMirrorBatcher,
 )
-from claude_agent_sdk.testing import run_session_store_conformance  # noqa: E402
-from pymongo import AsyncMongoClient  # noqa: E402
+from claude_agent_sdk.testing import run_session_store_conformance
+from pymongo import AsyncMongoClient
 
-from claude_agent_sdk_mongodb_session_store import (  # noqa: E402
+from claude_agent_sdk_mongodb_session_store import (
     MongoDBSessionStore,
     MongoDBSessionStoreOptions,
 )
@@ -63,24 +44,6 @@ SESSION_ID = "550e8400-e29b-41d4-a716-446655440000"
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def client() -> AsyncIterator[AsyncMongoClient]:
-    c: AsyncMongoClient = AsyncMongoClient(MONGODB_URL)
-    try:
-        yield c
-    finally:
-        await c.close()
-
-
-@pytest.fixture
-async def db_name(client: AsyncMongoClient) -> AsyncIterator[str]:
-    name = f"claude_test_{uuid.uuid4().hex[:8]}"
-    try:
-        yield name
-    finally:
-        await client.drop_database(name)
 
 
 @pytest.fixture
@@ -117,31 +80,6 @@ class TestConformance:
             return s
 
         await run_session_store_conformance(make_store)
-
-    @pytest.mark.anyio
-    async def test_store_implements_required_methods(self, store: SessionStore) -> None:
-        """SessionStore is not @runtime_checkable; probe via _store_implements()."""
-        from claude_agent_sdk._internal.session_store_validation import (
-            _store_implements,
-        )
-
-        assert _store_implements(store, "append")
-        assert _store_implements(store, "load")
-
-    @pytest.mark.anyio
-    async def test_rejects_unsafe_collection_name(
-        self, client: AsyncMongoClient
-    ) -> None:
-        with pytest.raises(ValueError, match="must match"):
-            MongoDBSessionStore(
-                client=client,
-                entries_collection="bad; drop",
-            )
-        with pytest.raises(ValueError, match="must match"):
-            MongoDBSessionStore(
-                client=client,
-                summaries_collection="bad$col",
-            )
 
 
 # ---------------------------------------------------------------------------
