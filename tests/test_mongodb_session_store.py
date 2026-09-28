@@ -38,8 +38,6 @@ if not MONGODB_URL:
         allow_module_level=True,
     )
 
-from pymongo import AsyncMongoClient  # noqa: E402
-
 from claude_agent_sdk import (  # noqa: E402
     ClaudeAgentOptions,
     SessionStore,
@@ -52,11 +50,12 @@ from claude_agent_sdk._internal.transcript_mirror_batcher import (  # noqa: E402
     TranscriptMirrorBatcher,
 )
 from claude_agent_sdk.testing import run_session_store_conformance  # noqa: E402
+from pymongo import AsyncMongoClient  # noqa: E402
+
 from claude_agent_sdk_mongodb_session_store import (  # noqa: E402
     MongoDBSessionStore,
     MongoDBSessionStoreOptions,
 )
-
 
 SESSION_ID = "550e8400-e29b-41d4-a716-446655440000"
 
