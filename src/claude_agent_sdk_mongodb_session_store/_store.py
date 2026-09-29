@@ -236,8 +236,6 @@ class MongoDBSessionStore(SessionStore):
             [("project_key", 1), ("subpath", 1), ("session_id", 1), ("mtime", -1)],
             name="sessions_idx",
         )
-        # Only fields a summary rewrite never changes, so rewrites (one per
-        # main-transcript append) cost no index maintenance.
         await self._summaries.create_index(
             [("_id.project_key", 1)],
             name="summaries_idx",
