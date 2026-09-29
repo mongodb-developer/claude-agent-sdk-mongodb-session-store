@@ -61,15 +61,17 @@ class TestOrdering:
         assert await b.load(KEY) == expected
 
     @pytest.mark.anyio
-    async def test_seq_is_unique_per_transcript(self, make_store: StoreFactory) -> None:
+    async def test_position_is_unique_per_transcript(
+        self, make_store: StoreFactory
+    ) -> None:
         """The schema enforces what the counter guarantees: no two entries in
-        one transcript share a ``seq``. The same ``seq`` in another transcript
+        one transcript share a ``position``. The same ``position`` in another transcript
         is fine."""
         store = await make_store()
         await store.append(KEY, [_e("a")])
         doc = await store._entries.find_one({}, {"_id": 0})
         assert doc is not None
-        assert doc["seq"] == 1
+        assert doc["position"] == 1
 
         with pytest.raises(DuplicateKeyError):
             await store._entries.insert_one(dict(doc))

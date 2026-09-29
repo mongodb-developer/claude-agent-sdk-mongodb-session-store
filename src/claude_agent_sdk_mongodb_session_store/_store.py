@@ -36,7 +36,7 @@ Three collections share a single database:
       project_key: str,
       session_id:  str,
       subpath:     str,                 # "" sentinel for main transcript
-      seq:         int,                 # ordering key, from the counter
+      position:    int,                 # append order, from the counter
       entry:       <opaque JSON>,
       mtime:       int,                 # Unix epoch ms, write-time stamp
     }
@@ -52,13 +52,13 @@ incrementally inside :meth:`MongoDBSessionStore.append` via
     }
 
 ``claude_session_counters`` — one document per transcript, holding the last
-``seq`` reserved by :meth:`MongoDBSessionStore.append` and the time of the
+``position`` reserved by :meth:`MongoDBSessionStore.append` and the time of the
 latest append::
 
     {
-      _id:   {project_key: str, session_id: str, subpath: str},
-      seq:   int,
-      mtime: int,                       # Unix epoch ms (same clock as entries)
+      _id:           {project_key: str, session_id: str, subpath: str},
+      last_position: int,
+      mtime:         int,               # Unix epoch ms (same clock as entries)
     }
 
 The empty string is the ``subpath`` sentinel for the main transcript so the
@@ -143,17 +143,17 @@ class MongoDBSessionStoreOptions:
     accepts, except the reserved ``system.`` namespace."""
 
     counters_collection: str = "claude_session_counters"
-    """Collection name for the per-transcript sequence counters that order
-    entries. Any name MongoDB accepts, except the reserved ``system.``
+    """Collection name for the per-transcript counters that hand out entry
+    positions. Any name MongoDB accepts, except the reserved ``system.``
     namespace."""
 
 
 class MongoDBSessionStore(SessionStore):
     """MongoDB-backed :class:`~claude_agent_sdk.SessionStore`.
 
-    One document per transcript entry, ordered by a per-transcript ``seq``
-    that ``append()`` reserves atomically from a counter document.
-    ``load()`` is ``find().sort("seq", 1)``.
+    One document per transcript entry, ordered by a per-transcript
+    ``position`` that ``append()`` reserves atomically from a counter
+    document. ``load()`` is ``find().sort("position", 1)``.
 
     Args:
         client: Pre-configured ``pymongo.AsyncMongoClient``.
@@ -162,7 +162,7 @@ class MongoDBSessionStore(SessionStore):
             (default ``"claude_session_entries"``).
         summaries_collection: Collection for summary sidecars
             (default ``"claude_session_summaries"``).
-        counters_collection: Collection for sequence counters
+        counters_collection: Collection for position counters
             (default ``"claude_session_counters"``).
         options: Alternative to positional args; takes precedence if given.
     """
@@ -235,9 +235,9 @@ class MongoDBSessionStore(SessionStore):
         in the steady state.
         """
         await self._entries.create_index(
-            [("project_key", 1), ("session_id", 1), ("subpath", 1), ("seq", 1)],
-            name="key_seq_idx",
-            # The counter already hands out each seq once; this enforces it.
+            [("project_key", 1), ("session_id", 1), ("subpath", 1), ("position", 1)],
+            name="key_position_idx",
+            # The counter already hands out each position once; this enforces it.
             unique=True,
         )
         # Ordered so list_sessions() can DISTINCT_SCAN: one key per session.
@@ -254,10 +254,10 @@ class MongoDBSessionStore(SessionStore):
             name="counters_session_idx",
         )
 
-    async def _reserve_seq(
+    async def _reserve_positions(
         self, key: SessionKey, subpath: str, n: int, mtime: int
     ) -> int:
-        """Atomically reserve ``n`` sequence numbers and return the first.
+        """Atomically reserve ``n`` positions and return the first.
 
         Also records ``mtime`` as the transcript's latest append time, which
         :meth:`delete_inactive` reads.
@@ -275,12 +275,12 @@ class MongoDBSessionStore(SessionStore):
                     "subpath": subpath,
                 }
             },
-            {"$inc": {"seq": n}, "$max": {"mtime": mtime}},
+            {"$inc": {"last_position": n}, "$max": {"mtime": mtime}},
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
         assert doc is not None  # For typing. upsert=True with AFTER never returns None.
-        return int(doc["seq"]) - n + 1
+        return int(doc["last_position"]) - n + 1
 
     # ------------------------------------------------------------------
     # SessionStore protocol
@@ -291,13 +291,13 @@ class MongoDBSessionStore(SessionStore):
             return
         subpath = key.get("subpath") or _MAIN
         now = int(time.time() * 1000)
-        first_seq = await self._reserve_seq(key, subpath, len(entries), now)
+        first_position = await self._reserve_positions(key, subpath, len(entries), now)
         docs: list[dict[str, Any]] = [
             {
                 "project_key": key["project_key"],
                 "session_id": key["session_id"],
                 "subpath": subpath,
-                "seq": first_seq + i,
+                "position": first_position + i,
                 "entry": dict(entry),
                 "mtime": now,
             }
@@ -342,7 +342,7 @@ class MongoDBSessionStore(SessionStore):
                 "session_id": key["session_id"],
                 "subpath": key.get("subpath") or _MAIN,
             }
-        ).sort("seq", 1)
+        ).sort("position", 1)
         docs = await cursor.to_list(length=None)
         if not docs:
             return None
@@ -396,7 +396,7 @@ class MongoDBSessionStore(SessionStore):
             )
             return
         # Cascade: main + every subpath under (project_key, session_id),
-        # their sequence counters, and the summary sidecar.
+        # their position counters, and the summary sidecar.
         await self._entries.delete_many(
             {
                 "project_key": key["project_key"],
