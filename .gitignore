@@ -26,3 +26,6 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+# Local working docs (design notes, reviews), never committed
+tmp/
