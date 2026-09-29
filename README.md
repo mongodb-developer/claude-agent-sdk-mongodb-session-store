@@ -130,8 +130,8 @@ loses the race reads the summary again and rebuilds it from the stored
 entries. The same check stops an in-flight append from restoring the
 summary of a session that was deleted in the meantime.
 
-Within one process, a per-session `anyio.Lock` also serializes updates,
-which avoids needless retries.
+The store keeps no per-session state in memory, so one instance can serve
+any number of sessions in a long-running process.
 
 ## Retention
 

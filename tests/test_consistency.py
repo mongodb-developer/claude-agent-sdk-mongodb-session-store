@@ -360,3 +360,27 @@ class TestAcrossProcesses:
         monkeypatch.setattr(store._summaries, "replace_one", always_conflicts)
         with pytest.raises(RuntimeError, match="summary"):
             await store.append(KEY, [_e("second")])
+
+
+class TestNoPerSessionState:
+    @pytest.mark.anyio
+    async def test_store_does_not_grow_with_sessions(
+        self, make_store: StoreFactory
+    ) -> None:
+        """One store instance serves a long-running process across many
+        sessions, so it must not keep anything per session in memory."""
+
+        def sizes(store: MongoDBSessionStore) -> dict[str, int]:
+            return {
+                name: len(value)
+                for name, value in vars(store).items()
+                if isinstance(value, (dict, list, set))
+            }
+
+        store = await make_store()
+        before = sizes(store)
+        for i in range(20):
+            key: SessionKey = {"project_key": "proj", "session_id": f"s{i}"}
+            await store.append(key, [_e("a")])
+            await store.delete(key)
+        assert sizes(store) == before

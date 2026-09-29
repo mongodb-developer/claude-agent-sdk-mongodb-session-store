@@ -79,8 +79,8 @@ writer that loses the race reads the summary again and rebuilds it from the
 stored entries. The same check stops an append from restoring the summary of
 a session deleted in the meantime.
 
-Within one process, a per-session ``anyio.Lock`` also serializes updates,
-which avoids needless retries.
+The store keeps no per-session state in memory, so one instance can serve
+any number of sessions in a long-running process.
 
 Retention
 ---------
@@ -104,7 +104,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-import anyio
 from bson import ObjectId
 from claude_agent_sdk import (
     SessionKey,
@@ -203,11 +202,6 @@ class MongoDBSessionStore(SessionStore):
         self._entries = self._collection("entries_collection", entries_collection)
         self._summaries = self._collection("summaries_collection", summaries_collection)
         self._counters = self._collection("counters_collection", counters_collection)
-        # Per-session locks for the read-fold-write summary update. Keys are
-        # (project_key, session_id); locks are created lazily and never
-        # garbage-collected — this is reference code, not a long-running
-        # service.
-        self._summary_locks: dict[tuple[str, str], anyio.Lock] = {}
 
     def _collection(self, label: str, name: str) -> AsyncCollection[dict[str, Any]]:
         """Return collection ``name``, raising ``ValueError`` if it is invalid.
@@ -225,14 +219,6 @@ class MongoDBSessionStore(SessionStore):
             return self._db[name]
         except InvalidName as e:
             raise ValueError(f"{label} {name!r} is invalid: {e}") from e
-
-    def _summary_lock(self, key: SessionKey) -> anyio.Lock:
-        slot = (key["project_key"], key["session_id"])
-        lock = self._summary_locks.get(slot)
-        if lock is None:
-            lock = anyio.Lock()
-            self._summary_locks[slot] = lock
-        return lock
 
     # ------------------------------------------------------------------
     # Schema
@@ -344,30 +330,29 @@ class MongoDBSessionStore(SessionStore):
             "project_key": key["project_key"],
             "session_id": key["session_id"],
         }
-        async with self._summary_lock(key):
-            for attempt in range(_SUMMARY_WRITE_ATTEMPTS):
-                prev_doc = await self._summaries.find_one({"_id": compound_id})
-                new_doc = await self._next_summary(
-                    key,
-                    prev_doc,
-                    entries if all_new and attempt == 0 else None,
-                    first_position,
-                    mtime,
-                )
-                if new_doc is None:
+        for attempt in range(_SUMMARY_WRITE_ATTEMPTS):
+            prev_doc = await self._summaries.find_one({"_id": compound_id})
+            new_doc = await self._next_summary(
+                key,
+                prev_doc,
+                entries if all_new and attempt == 0 else None,
+                first_position,
+                mtime,
+            )
+            if new_doc is None:
+                return
+            new_doc = {"_id": compound_id, "rev": ObjectId(), **new_doc}
+            if prev_doc is None:
+                try:
+                    await self._summaries.insert_one(new_doc)
                     return
-                new_doc = {"_id": compound_id, "rev": ObjectId(), **new_doc}
-                if prev_doc is None:
-                    try:
-                        await self._summaries.insert_one(new_doc)
-                        return
-                    except DuplicateKeyError:
-                        continue
-                result = await self._summaries.replace_one(
-                    {"_id": compound_id, "rev": prev_doc.get("rev")}, new_doc
-                )
-                if result.matched_count:
-                    return
+                except DuplicateKeyError:
+                    continue
+            result = await self._summaries.replace_one(
+                {"_id": compound_id, "rev": prev_doc.get("rev")}, new_doc
+            )
+            if result.matched_count:
+                return
         raise RuntimeError(
             f"summary for {compound_id} kept changing; "
             f"gave up after {_SUMMARY_WRITE_ATTEMPTS} attempts"
@@ -519,29 +504,27 @@ class MongoDBSessionStore(SessionStore):
             )
             return
         # Cascade: main + every subpath under (project_key, session_id),
-        # their position counters, and the summary sidecar. Under the summary
-        # lock, so an in-flight append can't write the summary back.
-        async with self._summary_lock(key):
-            await self._entries.delete_many(
-                {
+        # their position counters, and the summary sidecar.
+        await self._entries.delete_many(
+            {
+                "project_key": key["project_key"],
+                "session_id": key["session_id"],
+            }
+        )
+        await self._counters.delete_many(
+            {
+                "_id.project_key": key["project_key"],
+                "_id.session_id": key["session_id"],
+            }
+        )
+        await self._summaries.delete_one(
+            {
+                "_id": {
                     "project_key": key["project_key"],
                     "session_id": key["session_id"],
                 }
-            )
-            await self._counters.delete_many(
-                {
-                    "_id.project_key": key["project_key"],
-                    "_id.session_id": key["session_id"],
-                }
-            )
-            await self._summaries.delete_one(
-                {
-                    "_id": {
-                        "project_key": key["project_key"],
-                        "session_id": key["session_id"],
-                    }
-                }
-            )
+            }
+        )
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
         result = await self._entries.distinct(

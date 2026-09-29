@@ -155,18 +155,17 @@ class TestAdapterSpecific:
     async def test_concurrent_appends_serialize_summary_fold(
         self, client: AsyncMongoClient, db_name: str
     ) -> None:
-        """The per-session anyio.Lock must serialize the read-fold-write so
-        each fold sees the previous fold's output as ``prev``.
+        """Concurrent read-fold-writes must not lose each other's fields.
 
-        Without the lock, two appends carrying *different* fields (one
-        setting ``customTitle``, the other setting ``gitBranch``) can each
-        read ``prev=None``, fold against an empty summary, and write a
-        doc that omits the other's field. The last writer wins entirely
-        and one field is clobbered. With the lock, the second fold sees
-        the first's output and merges into it, so both fields survive.
+        Two appends carrying *different* fields (one setting
+        ``customTitle``, the other setting ``gitBranch``) can each read
+        ``prev=None`` and fold against an empty summary. Without the
+        summary's compare-and-swap, the last writer wins entirely and one
+        field is clobbered. With it, the loser re-reads and rebuilds, so
+        both fields survive.
 
-        Repeating across many trials makes a missing lock almost certain
-        to produce at least one clobbered run.
+        Repeating across many trials makes a broken compare-and-swap
+        almost certain to produce at least one clobbered run.
         """
         import anyio
 
@@ -203,13 +202,13 @@ class TestAdapterSpecific:
             ]
             assert len(summaries) == 1
             data = summaries[0]["data"]
-            # With the lock, both fields must be present after any
-            # interleaving. A missing field => fold raced => regression.
+            # Both fields must be present after any interleaving. A missing
+            # field => fold raced => regression.
             assert data.get("custom_title") == "TITLE", (
-                f"trial {trial}: custom_title clobbered (lock removed?) — data={data}"
+                f"trial {trial}: custom_title clobbered — data={data}"
             )
             assert data.get("git_branch") == "main", (
-                f"trial {trial}: git_branch clobbered (lock removed?) — data={data}"
+                f"trial {trial}: git_branch clobbered — data={data}"
             )
 
 
