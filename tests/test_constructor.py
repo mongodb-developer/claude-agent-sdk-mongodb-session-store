@@ -38,10 +38,11 @@ class TestConstructor:
 
     @pytest.mark.anyio
     async def test_positional_args(self, offline_client: Client) -> None:
-        store = MongoDBSessionStore(offline_client, "db", "ents", "sums")
+        store = MongoDBSessionStore(offline_client, "db", "ents", "sums", "ctrs")
         assert store._db.name == "db"
         assert store._entries.name == "ents"
         assert store._summaries.name == "sums"
+        assert store._counters.name == "ctrs"
 
     @pytest.mark.anyio
     async def test_options_take_precedence(self, offline_client: Client) -> None:
@@ -56,6 +57,7 @@ class TestConstructor:
                     db_name="db",
                     entries_collection="ents",
                     summaries_collection="sums",
+                    counters_collection="ctrs",
                 ),
             )
         finally:
@@ -64,6 +66,7 @@ class TestConstructor:
         assert store._db.name == "db"
         assert store._entries.name == "ents"
         assert store._summaries.name == "sums"
+        assert store._counters.name == "ctrs"
 
 
 class TestCollectionNames:
@@ -72,7 +75,9 @@ class TestCollectionNames:
         "name",
         ["", "a..b", "x.", ".x", "bad$col", "nul\x00", "system.foo", "system.users"],
     )
-    @pytest.mark.parametrize("field", ["entries_collection", "summaries_collection"])
+    @pytest.mark.parametrize(
+        "field", ["entries_collection", "summaries_collection", "counters_collection"]
+    )
     async def test_rejects_invalid_collection_name(
         self, offline_client: Client, field: str, name: str
     ) -> None:

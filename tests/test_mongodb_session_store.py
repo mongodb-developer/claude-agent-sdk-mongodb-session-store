@@ -75,6 +75,7 @@ class TestConformance:
                 db_name=db_name,
                 entries_collection=f"entries_{n}",
                 summaries_collection=f"summaries_{n}",
+                counters_collection=f"counters_{n}",
             )
             await s.create_schema()
             return s

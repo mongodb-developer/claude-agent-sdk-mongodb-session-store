@@ -27,15 +27,16 @@ Usage::
 
 Schema
 ------
-Two collections share a single database:
+Three collections share a single database:
 
 ``claude_session_entries`` — one document per JSONL entry::
 
     {
-      _id: ObjectId,                    # ordering key (server-assigned)
+      _id: ObjectId,
       project_key: str,
       session_id:  str,
       subpath:     str,                 # "" sentinel for main transcript
+      seq:         int,                 # ordering key, from the counter
       entry:       <opaque JSON>,
       mtime:       int,                 # Unix epoch ms, write-time stamp
     }
@@ -48,6 +49,14 @@ incrementally inside :meth:`MongoDBSessionStore.append` via
       _id:   {project_key: str, session_id: str},
       mtime: int,                       # Unix epoch ms (same clock as entries)
       data:  <opaque SDK-owned dict>,
+    }
+
+``claude_session_counters`` — one document per transcript, holding the last
+``seq`` reserved by :meth:`MongoDBSessionStore.append`::
+
+    {
+      _id: {project_key: str, session_id: str, subpath: str},
+      seq: int,
     }
 
 The empty string is the ``subpath`` sentinel for the main transcript so the
@@ -90,6 +99,7 @@ from claude_agent_sdk import (
     SessionSummaryEntry,
     fold_session_summary,
 )
+from pymongo import ReturnDocument
 from pymongo.errors import InvalidName
 
 if TYPE_CHECKING:
@@ -123,13 +133,18 @@ class MongoDBSessionStoreOptions:
     """Collection name for the per-session summary sidecar. Any name MongoDB
     accepts, except the reserved ``system.`` namespace."""
 
+    counters_collection: str = "claude_session_counters"
+    """Collection name for the per-transcript sequence counters that order
+    entries. Any name MongoDB accepts, except the reserved ``system.``
+    namespace."""
+
 
 class MongoDBSessionStore(SessionStore):
     """MongoDB-backed :class:`~claude_agent_sdk.SessionStore`.
 
-    One document per transcript entry; ordering via the server-assigned
-    ``_id`` (``ObjectId``). ``append()`` is a single ``insert_many``;
-    ``load()`` is ``find().sort("_id", 1)``.
+    One document per transcript entry, ordered by a per-transcript ``seq``
+    that ``append()`` reserves atomically from a counter document.
+    ``load()`` is ``find().sort("seq", 1)``.
 
     Args:
         client: Pre-configured ``pymongo.AsyncMongoClient``.
@@ -138,6 +153,8 @@ class MongoDBSessionStore(SessionStore):
             (default ``"claude_session_entries"``).
         summaries_collection: Collection for summary sidecars
             (default ``"claude_session_summaries"``).
+        counters_collection: Collection for sequence counters
+            (default ``"claude_session_counters"``).
         options: Alternative to positional args; takes precedence if given.
     """
 
@@ -147,6 +164,7 @@ class MongoDBSessionStore(SessionStore):
         db_name: str | None = None,
         entries_collection: str = "claude_session_entries",
         summaries_collection: str = "claude_session_summaries",
+        counters_collection: str = "claude_session_counters",
         *,
         options: MongoDBSessionStoreOptions | None = None,
     ) -> None:
@@ -155,6 +173,7 @@ class MongoDBSessionStore(SessionStore):
             db_name = options.db_name
             entries_collection = options.entries_collection
             summaries_collection = options.summaries_collection
+            counters_collection = options.counters_collection
         if client is None:
             raise ValueError("MongoDBSessionStore requires 'client'")
 
@@ -163,6 +182,7 @@ class MongoDBSessionStore(SessionStore):
         )
         self._entries = self._collection("entries_collection", entries_collection)
         self._summaries = self._collection("summaries_collection", summaries_collection)
+        self._counters = self._collection("counters_collection", counters_collection)
         # Per-session locks for the read-fold-write summary update. Keys are
         # (project_key, session_id); locks are created lazily and never
         # garbage-collected — this is reference code, not a long-running
@@ -206,8 +226,8 @@ class MongoDBSessionStore(SessionStore):
         in the steady state.
         """
         await self._entries.create_index(
-            [("project_key", 1), ("session_id", 1), ("subpath", 1), ("_id", 1)],
-            name="key_idx",
+            [("project_key", 1), ("session_id", 1), ("subpath", 1), ("seq", 1)],
+            name="key_seq_idx",
         )
         await self._entries.create_index(
             [("project_key", 1), ("subpath", 1), ("mtime", -1)],
@@ -217,6 +237,33 @@ class MongoDBSessionStore(SessionStore):
             [("_id.project_key", 1), ("mtime", -1)],
             name="summaries_idx",
         )
+        await self._counters.create_index(
+            [("_id.project_key", 1), ("_id.session_id", 1)],
+            name="counters_session_idx",
+        )
+
+    async def _reserve_seq(self, key: SessionKey, subpath: str, n: int) -> int:
+        """Atomically reserve ``n`` sequence numbers and return the first.
+
+        The counter is incremented on the server, so reservations are totally
+        ordered even across processes with skewed clocks. Ordering by
+        client-generated ObjectIds would not be: they sort by the client's
+        clock in seconds, then a per-process random value.
+        """
+        doc = await self._counters.find_one_and_update(
+            {
+                "_id": {
+                    "project_key": key["project_key"],
+                    "session_id": key["session_id"],
+                    "subpath": subpath,
+                }
+            },
+            {"$inc": {"seq": n}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        assert doc is not None  # upsert=True with AFTER always returns a doc
+        return int(doc["seq"]) - n + 1
 
     # ------------------------------------------------------------------
     # SessionStore protocol
@@ -226,20 +273,19 @@ class MongoDBSessionStore(SessionStore):
         if not entries:
             return
         subpath = key.get("subpath") or _MAIN
+        first_seq = await self._reserve_seq(key, subpath, len(entries))
         now = int(time.time() * 1000)
         docs: list[dict[str, Any]] = [
             {
                 "project_key": key["project_key"],
                 "session_id": key["session_id"],
                 "subpath": subpath,
+                "seq": first_seq + i,
                 "entry": dict(entry),
                 "mtime": now,
             }
-            for entry in entries
+            for i, entry in enumerate(entries)
         ]
-        # ordered=True preserves intra-batch order; the server-assigned
-        # ObjectId is monotonic per writer so inter-batch order is preserved
-        # too without an explicit sequence column.
         await self._entries.insert_many(docs, ordered=True)
 
         # Subagent transcripts must NOT contribute to the main session's
@@ -279,7 +325,7 @@ class MongoDBSessionStore(SessionStore):
                 "session_id": key["session_id"],
                 "subpath": key.get("subpath") or _MAIN,
             }
-        ).sort("_id", 1)
+        ).sort("seq", 1)
         docs = await cursor.to_list(length=None)
         if not docs:
             return None
@@ -328,13 +374,28 @@ class MongoDBSessionStore(SessionStore):
                     "subpath": subpath,
                 }
             )
+            await self._counters.delete_one(
+                {
+                    "_id": {
+                        "project_key": key["project_key"],
+                        "session_id": key["session_id"],
+                        "subpath": subpath,
+                    }
+                }
+            )
             return
         # Cascade: main + every subpath under (project_key, session_id),
-        # plus the summary sidecar.
+        # their sequence counters, and the summary sidecar.
         await self._entries.delete_many(
             {
                 "project_key": key["project_key"],
                 "session_id": key["session_id"],
+            }
+        )
+        await self._counters.delete_many(
+            {
+                "_id.project_key": key["project_key"],
+                "_id.session_id": key["session_id"],
             }
         )
         await self._summaries.delete_one(

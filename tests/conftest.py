@@ -8,13 +8,16 @@ everywhere.
 
 from __future__ import annotations
 
+import itertools
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
 from pymongo import AsyncMongoClient
+
+from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
 MONGODB_URL_ENV = "SESSION_STORE_MONGODB_URL"
 
@@ -67,3 +70,31 @@ async def offline_client() -> AsyncIterator[AsyncMongoClient[dict[str, Any]]]:
         yield c
     finally:
         await c.close()
+
+
+StoreFactory = Callable[..., Awaitable[MongoDBSessionStore]]
+
+
+@pytest.fixture
+def make_store(client: AsyncMongoClient[dict[str, Any]], db_name: str) -> StoreFactory:
+    """Build schema-initialized stores in the per-test database.
+
+    ``make_store()`` gives a store on its own fresh collections. Pass
+    ``prefix=`` to get a second instance on the *same* collections as an
+    earlier call, which simulates another process sharing the database.
+    """
+    counter = itertools.count()
+
+    async def factory(prefix: str | None = None) -> MongoDBSessionStore:
+        p = prefix if prefix is not None else f"c{next(counter)}"
+        store = MongoDBSessionStore(
+            client=client,
+            db_name=db_name,
+            entries_collection=f"{p}_entries",
+            summaries_collection=f"{p}_summaries",
+            counters_collection=f"{p}_counters",
+        )
+        await store.create_schema()
+        return store
+
+    return factory
