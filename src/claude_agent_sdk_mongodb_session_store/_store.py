@@ -464,27 +464,29 @@ class MongoDBSessionStore(SessionStore):
             )
             return
         # Cascade: main + every subpath under (project_key, session_id),
-        # their position counters, and the summary sidecar.
-        await self._entries.delete_many(
-            {
-                "project_key": key["project_key"],
-                "session_id": key["session_id"],
-            }
-        )
-        await self._counters.delete_many(
-            {
-                "_id.project_key": key["project_key"],
-                "_id.session_id": key["session_id"],
-            }
-        )
-        await self._summaries.delete_one(
-            {
-                "_id": {
+        # their position counters, and the summary sidecar. Under the summary
+        # lock, so an in-flight append can't write the summary back.
+        async with self._summary_lock(key):
+            await self._entries.delete_many(
+                {
                     "project_key": key["project_key"],
                     "session_id": key["session_id"],
                 }
-            }
-        )
+            )
+            await self._counters.delete_many(
+                {
+                    "_id.project_key": key["project_key"],
+                    "_id.session_id": key["session_id"],
+                }
+            )
+            await self._summaries.delete_one(
+                {
+                    "_id": {
+                        "project_key": key["project_key"],
+                        "session_id": key["session_id"],
+                    }
+                }
+            )
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
         result = await self._entries.distinct(

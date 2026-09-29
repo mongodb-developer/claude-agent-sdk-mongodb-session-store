@@ -16,6 +16,7 @@ from claude_agent_sdk import SessionKey
 from pymongo.errors import DuplicateKeyError
 
 import claude_agent_sdk_mongodb_session_store._store as _store
+from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
 from .conftest import StoreFactory
 
@@ -24,6 +25,28 @@ KEY: SessionKey = {"project_key": "proj", "session_id": "sess"}
 
 def _e(uuid: str, **extra: Any) -> dict[str, Any]:
     return {"type": "user", "uuid": uuid, **extra}
+
+
+def _pause_after_summary_read(
+    store: MongoDBSessionStore, monkeypatch: pytest.MonkeyPatch
+) -> tuple[anyio.Event, anyio.Event]:
+    """Make the store's next summary read stall until released.
+
+    Returns ``(read, release)``: ``read`` is set once the summary has been
+    read, and the append resumes when ``release`` is set.
+    """
+    read, release = anyio.Event(), anyio.Event()
+    real_find_one = store._summaries.find_one
+
+    async def find_one(*args: Any, **kwargs: Any) -> Any:
+        doc = await real_find_one(*args, **kwargs)
+        if not read.is_set():
+            read.set()
+            await release.wait()
+        return doc
+
+    monkeypatch.setattr(store._summaries, "find_one", find_one)
+    return read, release
 
 
 class TestOrdering:
@@ -229,3 +252,27 @@ class TestSummaryFold:
         [summary] = await store.list_session_summaries("proj")
         [listed] = await store.list_sessions("proj")
         assert summary["mtime"] == listed["mtime"] == 2_000_000
+
+
+class TestDeleteRace:
+    @pytest.mark.anyio
+    async def test_delete_during_append_leaves_no_summary(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``delete()`` runs while an append has read the summary but not yet
+        written it back. The append must not bring the deleted session's
+        summary back."""
+        store = await make_store()
+        await store.append(KEY, [_e("a", customTitle="deleted")])
+        read, release = _pause_after_summary_read(store, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, KEY, [_e("b")])
+            await read.wait()
+            tg.start_soon(store.delete, KEY)
+            # Give the delete time to run, if nothing holds it back.
+            await anyio.sleep(0.2)
+            release.set()
+
+        assert await store.list_session_summaries("proj") == []
+        assert await store.load(KEY) is None
