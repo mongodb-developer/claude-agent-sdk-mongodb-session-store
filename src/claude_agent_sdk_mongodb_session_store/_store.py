@@ -478,7 +478,9 @@ class MongoDBSessionStore(SessionStore):
                 "mtime": int(d["mtime"]),
                 "data": d["data"],
             }
-            async for d in self._summaries.find({"_id.project_key": project_key})
+            async for d in self._summaries.find(
+                {"_id.project_key": project_key}, {"mtime": 1, "data": 1}
+            )
         ]
 
     async def delete(self, key: SessionKey) -> None:

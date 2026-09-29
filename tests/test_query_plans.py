@@ -118,6 +118,8 @@ class TestSummariesPlan:
         )
         assert record["planSummary"].startswith("IXSCAN"), record["planSummary"]
         assert record["docsExamined"] == 3
+        # Bookkeeping fields (last_position, rev) stay on the server.
+        assert set(record["command"]["projection"]) == {"mtime", "data"}
 
 
 class TestAppendPlan:
