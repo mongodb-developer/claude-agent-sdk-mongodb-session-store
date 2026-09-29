@@ -236,8 +236,10 @@ class MongoDBSessionStore(SessionStore):
             [("project_key", 1), ("subpath", 1), ("session_id", 1), ("mtime", -1)],
             name="sessions_idx",
         )
+        # Only fields a summary rewrite never changes, so rewrites (one per
+        # main-transcript append) cost no index maintenance.
         await self._summaries.create_index(
-            [("_id.project_key", 1), ("mtime", -1)],
+            [("_id.project_key", 1)],
             name="summaries_idx",
         )
         await self._counters.create_index(
@@ -350,15 +352,13 @@ class MongoDBSessionStore(SessionStore):
     async def list_session_summaries(
         self, project_key: str
     ) -> list[SessionSummaryEntry]:
-        cursor = self._summaries.find({"_id.project_key": project_key})
-        docs = await cursor.to_list(length=None)
         return [
             {
                 "session_id": d["_id"]["session_id"],
                 "mtime": int(d["mtime"]),
                 "data": d["data"],
             }
-            for d in docs
+            async for d in self._summaries.find({"_id.project_key": project_key})
         ]
 
     async def delete(self, key: SessionKey) -> None:

@@ -78,9 +78,9 @@ counter document, and `load()` is `find().sort("seq", 1)`.
 `create_schema()` creates four indexes — a unique `(project_key, session_id,
 subpath, seq)` serving `load()`/`delete()`/`list_subkeys()`, `(project_key,
 subpath, session_id, mtime DESC)` that lets `list_sessions()` read one index
-key per session (a `DISTINCT_SCAN`), `(_id.project_key, mtime DESC)` on the
-summaries collection, and `(_id.project_key, _id.session_id)` on the counters
-collection for cascade deletes.
+key per session (a `DISTINCT_SCAN`), `(_id.project_key)` on the summaries
+collection, and `(_id.project_key, _id.session_id)` on the counters collection
+for cascade deletes.
 
 ## Why a summary sidecar?
 
