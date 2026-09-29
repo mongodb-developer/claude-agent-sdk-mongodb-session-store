@@ -59,6 +59,7 @@ Summaries — one document per main session, maintained incrementally inside
   "_id":           {"project_key": str, "session_id": str},
   "mtime":         int,       # epoch ms (same clock as entries)
   "last_position": int,       # last main-transcript entry folded in
+  "rev":           ObjectId,  # new on every write, for compare-and-swap
   "data":          <opaque>,  # SDK-owned summary state, persisted verbatim
 }
 ```
@@ -122,8 +123,15 @@ stored every time, as the SDK's `SessionStore` protocol asks.
 
 Per the `SessionStore.list_session_summaries` contract, sidecar updates
 inside `append()` must be serialized when calls can race for the same
-session. The adapter holds a per-session `anyio.Lock` keyed by
-`(project_key, session_id)` for the duration of the read-fold-write.
+session. The summary write is a compare-and-swap on its `rev` token, which
+changes on every write, so appends from different processes (workers, pods)
+to the same session can't overwrite each other's summary. A writer that
+loses the race reads the summary again and rebuilds it from the stored
+entries. The same check stops an in-flight append from restoring the
+summary of a session that was deleted in the meantime.
+
+Within one process, a per-session `anyio.Lock` also serializes updates,
+which avoids needless retries.
 
 ## Retention
 
@@ -191,10 +199,6 @@ SDK's [`examples/session-stores/mongodb/`](https://github.com/anthropics/claude-
 - Size the `AsyncMongoClient` connection pool for expected concurrent
   sessions; don't share a pool with request-handler code that holds
   connections.
-- The summary sidecar is read-fold-written inside `append()`. The adapter
-  serializes per-session updates with an `anyio.Lock`, but multi-process
-  writers against the same session would still race — pin a session to a
-  single writer or layer your own coordination on top.
 - Schedule `delete_inactive()` for retention — every collection grows
   unbounded otherwise.
 

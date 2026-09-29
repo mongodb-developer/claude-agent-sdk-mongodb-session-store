@@ -276,3 +276,87 @@ class TestDeleteRace:
 
         assert await store.list_session_summaries("proj") == []
         assert await store.load(KEY) is None
+
+
+class TestAcrossProcesses:
+    """Two store instances on the same collections stand in for two
+    processes: they share data but not in-process locks."""
+
+    @pytest.mark.anyio
+    async def test_concurrent_summary_update_is_not_overwritten(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = await make_store()
+        b = await make_store(prefix="c0")
+        await a.append(KEY, [_e("first")])
+        read, release = _pause_after_summary_read(a, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(a.append, KEY, [_e("t", customTitle="TITLE")])
+            await read.wait()
+            await b.append(KEY, [_e("g", gitBranch="main")])
+            release.set()
+
+        [summary] = await a.list_session_summaries("proj")
+        assert summary["data"]["custom_title"] == "TITLE"
+        assert summary["data"]["git_branch"] == "main"
+
+    @pytest.mark.anyio
+    async def test_delete_in_another_process_leaves_no_summary(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        a = await make_store()
+        b = await make_store(prefix="c0")
+        await a.append(KEY, [_e("first", customTitle="deleted")])
+        read, release = _pause_after_summary_read(a, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(a.append, KEY, [_e("late")])
+            await read.wait()
+            await b.delete(KEY)
+            release.set()
+
+        assert await a.list_session_summaries("proj") == []
+        assert await a.load(KEY) is None
+
+    @pytest.mark.anyio
+    async def test_session_recreated_in_another_process_is_not_mixed_with_old(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The session is deleted and started again under the same id while an
+        append from before the delete is in flight. The new summary may look
+        just like the one the stalled append read, so a version number that
+        restarts with the document would not notice. The stale append's
+        entry is gone and must not show up in the new summary."""
+        a = await make_store()
+        b = await make_store(prefix="c0")
+        await a.append(KEY, [_e("first")])
+        read, release = _pause_after_summary_read(a, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(a.append, KEY, [_e("stale", gitBranch="stale")])
+            await read.wait()
+            await b.delete(KEY)
+            await b.append(KEY, [_e("fresh", customTitle="fresh")])
+            release.set()
+
+        assert await a.load(KEY) == [_e("fresh", customTitle="fresh")]
+        [summary] = await a.list_session_summaries("proj")
+        assert summary["data"]["custom_title"] == "fresh"
+        assert "git_branch" not in summary["data"]
+
+    @pytest.mark.anyio
+    async def test_gives_up_when_summary_never_settles(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If every write loses the race, ``append()`` raises rather than
+        looping forever; the SDK retries the batch."""
+        store = await make_store()
+        await store.append(KEY, [_e("first")])
+
+        async def always_conflicts(*args: Any, **kwargs: Any) -> Any:
+            return SimpleNamespace(matched_count=0)
+
+        monkeypatch.setattr(store._summaries, "replace_one", always_conflicts)
+        with pytest.raises(RuntimeError, match="summary"):
+            await store.append(KEY, [_e("second")])
