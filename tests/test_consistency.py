@@ -12,6 +12,7 @@ from typing import Any
 import bson.objectid
 import pytest
 from claude_agent_sdk import SessionKey
+from pymongo.errors import DuplicateKeyError
 
 from .conftest import StoreFactory
 
@@ -58,6 +59,22 @@ class TestOrdering:
             expected.append(entry)
         assert await a.load(KEY) == expected
         assert await b.load(KEY) == expected
+
+    @pytest.mark.anyio
+    async def test_seq_is_unique_per_transcript(self, make_store: StoreFactory) -> None:
+        """The schema enforces what the counter guarantees: no two entries in
+        one transcript share a ``seq``. The same ``seq`` in another transcript
+        is fine."""
+        store = await make_store()
+        await store.append(KEY, [_e("a")])
+        doc = await store._entries.find_one({}, {"_id": 0})
+        assert doc is not None
+        assert doc["seq"] == 1
+
+        with pytest.raises(DuplicateKeyError):
+            await store._entries.insert_one(dict(doc))
+        await store._entries.insert_one({**doc, "subpath": "subagents/agent-1"})
+        await store._entries.insert_one({**doc, "session_id": "other"})
 
     @pytest.mark.anyio
     async def test_delete_removes_counters(self, make_store: StoreFactory) -> None:

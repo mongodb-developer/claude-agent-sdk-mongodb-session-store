@@ -228,6 +228,8 @@ class MongoDBSessionStore(SessionStore):
         await self._entries.create_index(
             [("project_key", 1), ("session_id", 1), ("subpath", 1), ("seq", 1)],
             name="key_seq_idx",
+            # The counter already hands out each seq once; this enforces it.
+            unique=True,
         )
         await self._entries.create_index(
             [("project_key", 1), ("subpath", 1), ("mtime", -1)],
@@ -262,7 +264,7 @@ class MongoDBSessionStore(SessionStore):
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
-        assert doc is not None  # upsert=True with AFTER always returns a doc
+        assert doc is not None  # For typing. upsert=True with AFTER never returns None.
         return int(doc["seq"]) - n + 1
 
     # ------------------------------------------------------------------

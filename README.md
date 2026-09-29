@@ -75,11 +75,11 @@ clock, so it cannot order entries written by different processes. Instead,
 `append()` reserves a block of `seq` values with one atomic `$inc` on the
 counter document, and `load()` is `find().sort("seq", 1)`.
 
-`create_schema()` creates four indexes — `(project_key, session_id, subpath,
-seq)` serving `load()`/`delete()`/`list_subkeys()`, `(project_key, subpath,
-mtime DESC)` serving `list_sessions()`, `(_id.project_key, mtime DESC)` on the
-summaries collection, and `(_id.project_key, _id.session_id)` on the counters
-collection for cascade deletes.
+`create_schema()` creates four indexes — a unique `(project_key, session_id,
+subpath, seq)` serving `load()`/`delete()`/`list_subkeys()`, `(project_key,
+subpath, mtime DESC)` serving `list_sessions()`, `(_id.project_key, mtime
+DESC)` on the summaries collection, and `(_id.project_key, _id.session_id)` on
+the counters collection for cascade deletes.
 
 ## Why a summary sidecar?
 
