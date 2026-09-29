@@ -231,8 +231,9 @@ class MongoDBSessionStore(SessionStore):
             # The counter already hands out each seq once; this enforces it.
             unique=True,
         )
+        # Ordered so list_sessions() can DISTINCT_SCAN: one key per session.
         await self._entries.create_index(
-            [("project_key", 1), ("subpath", 1), ("mtime", -1)],
+            [("project_key", 1), ("subpath", 1), ("session_id", 1), ("mtime", -1)],
             name="sessions_idx",
         )
         await self._summaries.create_index(
@@ -334,21 +335,17 @@ class MongoDBSessionStore(SessionStore):
         return [d["entry"] for d in docs]
 
     async def list_sessions(self, project_key: str) -> list[SessionStoreListEntry]:
-        # ``aggregate()`` is itself awaitable in pymongo's async API (returns
-        # a cursor); ``find()`` is not (returns the cursor synchronously).
-        cursor = await self._entries.aggregate(
-            [
-                {"$match": {"project_key": project_key, "subpath": _MAIN}},
-                {
-                    "$group": {
-                        "_id": "$session_id",
-                        "mtime": {"$max": "$mtime"},
-                    }
-                },
-            ]
-        )
-        rows = await cursor.to_list(length=None)
-        return [{"session_id": str(r["_id"]), "mtime": int(r["mtime"])} for r in rows]
+        # Sorting on the sessions_idx key order lets $group/$first read only
+        # each session's newest index key (DISTINCT_SCAN), never a document.
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"project_key": project_key, "subpath": _MAIN}},
+            {"$sort": {"session_id": 1, "mtime": -1}},
+            {"$group": {"_id": "$session_id", "mtime": {"$first": "$mtime"}}},
+        ]
+        return [
+            {"session_id": str(r["_id"]), "mtime": int(r["mtime"])}
+            async for r in await self._entries.aggregate(pipeline)
+        ]
 
     async def list_session_summaries(
         self, project_key: str
