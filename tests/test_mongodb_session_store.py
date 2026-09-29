@@ -22,6 +22,10 @@ import pytest
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     SessionStore,
+    delete_session_via_store,
+    get_session_messages_from_store,
+    import_session_to_store,
+    list_sessions_from_store,
     project_key_for_directory,
 )
 from claude_agent_sdk._internal.session_resume import (
@@ -282,3 +286,74 @@ class TestRoundTrip:
             assert [json.loads(line) for line in sub_jsonl.splitlines()] == sub_entries
         finally:
             await result.cleanup()
+
+    @pytest.mark.anyio
+    async def test_public_api_import_read_list_delete(
+        self,
+        store: SessionStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The same round trip through the SDK's public helpers only."""
+        config = tmp_path / "config"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        project_dir = config / "projects" / project_key_for_directory(cwd)
+        (project_dir / SESSION_ID / "subagents").mkdir(parents=True)
+
+        main_entries = [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "sessionId": SESSION_ID,
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {"role": "user", "content": "hello mongo"},
+            },
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "sessionId": SESSION_ID,
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "message": {"role": "assistant", "content": "hi"},
+            },
+            {
+                "type": "custom-title",
+                "customTitle": "Imported",
+                "sessionId": SESSION_ID,
+            },
+        ]
+        sub_entries = [{"type": "user", "uuid": "su1", "isSidechain": True}]
+        (project_dir / f"{SESSION_ID}.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in main_entries)
+        )
+        (project_dir / SESSION_ID / "subagents" / "agent-1.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in sub_entries)
+        )
+
+        # Re-importing must not duplicate anything: uuid is the idempotency key.
+        for _ in range(2):
+            await import_session_to_store(SESSION_ID, store, directory=str(cwd))
+
+        messages = await get_session_messages_from_store(
+            store, SESSION_ID, directory=str(cwd)
+        )
+        assert [(m.type, m.uuid) for m in messages] == [
+            ("user", "u1"),
+            ("assistant", "a1"),
+        ]
+
+        [info] = await list_sessions_from_store(store, directory=str(cwd))
+        assert info.session_id == SESSION_ID
+        assert info.custom_title == "Imported"
+        assert info.first_prompt == "hello mongo"
+
+        key = {"project_key": project_dir.name, "session_id": SESSION_ID}
+        assert await store.load({**key, "subpath": "subagents/agent-1"}) == sub_entries
+
+        await delete_session_via_store(store, SESSION_ID, directory=str(cwd))
+        assert await list_sessions_from_store(store, directory=str(cwd)) == []
+        assert await store.load(key) is None
+        assert await store.load({**key, "subpath": "subagents/agent-1"}) is None
