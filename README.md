@@ -45,6 +45,7 @@ transcript entry, ordered by `position`:
   "session_id":  str,
   "subpath":     str,    # "" sentinel for the main transcript
   "position":    int,    # per-transcript append order
+  "uuid":        str,    # entry["uuid"], when it has one
   "entry":       <opaque JSON>,
   "mtime":       int,    # Unix epoch ms, write-time stamp
 }
@@ -77,8 +78,9 @@ clock, so it cannot guarantee order of entries written by different processes. I
 `append()` reserves a block of positions with one atomic `$inc` on the
 counter document, and `load()` is `find().sort("position", 1)`.
 
-`create_schema()` creates four indexes — a unique `(project_key, session_id,
-subpath, position)` serving `load()`/`delete()`/`list_subkeys()`,
+`create_schema()` creates five indexes — a unique `(project_key, session_id,
+subpath, position)` serving `load()`/`delete()`/`list_subkeys()`, a unique
+`(project_key, session_id, subpath, uuid)` over entries that have a `uuid`,
 `(project_key, subpath, session_id, mtime DESC)` that lets `list_sessions()`
 read one index key per session (a `DISTINCT_SCAN`), `(_id.project_key)` on the
 summaries collection, and `(_id.project_key, _id.session_id)` on the counters
@@ -99,6 +101,14 @@ The summary itself is computed by the SDK's
 `fold_session_summary` (read inside `append()` and written back as one
 opaque `data` blob); the adapter never interprets the contents.
 `fold_session_summary` is exported from `claude_agent_sdk` as of 0.1.65.
+
+## Retries
+
+The SDK retries a failed `append()` with the same batch. Most entries carry
+a `uuid`, which the adapter treats as an idempotency key: an entry whose
+`uuid` is already stored in the same transcript is skipped, so a retry never
+stores it twice. Entries without a `uuid` (titles, tags, mode markers) are
+stored every time, as the SDK's `SessionStore` protocol asks.
 
 ## Concurrency
 

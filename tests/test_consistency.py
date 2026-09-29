@@ -14,6 +14,8 @@ import pytest
 from claude_agent_sdk import SessionKey
 from pymongo.errors import DuplicateKeyError
 
+import claude_agent_sdk_mongodb_session_store._store as _store
+
 from .conftest import StoreFactory
 
 KEY: SessionKey = {"project_key": "proj", "session_id": "sess"}
@@ -103,3 +105,59 @@ class TestOrdering:
         # A fresh transcript under a deleted key starts numbering again.
         await store.append(KEY, [_e("b")])
         assert await store.load(KEY) == [_e("b")]
+
+
+class TestIdempotency:
+    @pytest.mark.anyio
+    async def test_retried_batch_is_stored_once(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SDK retries a failed ``append()`` with the same batch. If the
+        entries were stored before the failure, the retry must not store them
+        again, and the summary must still reflect the batch."""
+        store = await make_store()
+        await store.append(KEY, [_e("a", n=1)])
+        batch = [_e("b", n=2, customTitle="t"), _e("c", n=3)]
+
+        real_fold = _store.fold_session_summary
+        calls = 0
+
+        def fail_once(*args: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("summary write failed")
+            return real_fold(*args)
+
+        monkeypatch.setattr(_store, "fold_session_summary", fail_once)
+        with pytest.raises(ConnectionError):
+            await store.append(KEY, batch)
+        await store.append(KEY, batch)
+
+        assert await store.load(KEY) == [_e("a", n=1), *batch]
+        [summary] = await store.list_session_summaries("proj")
+        assert summary["data"]["custom_title"] == "t"
+
+    @pytest.mark.anyio
+    async def test_entries_without_uuid_are_not_deduplicated(
+        self, make_store: StoreFactory
+    ) -> None:
+        """Per the protocol, entries without a ``uuid`` (titles, tags, mode
+        markers) are appended every time."""
+        store = await make_store()
+        tag = {"type": "tag", "tag": "x"}
+        await store.append(KEY, [tag])
+        await store.append(KEY, [tag])
+        assert await store.load(KEY) == [tag, tag]
+
+    @pytest.mark.anyio
+    async def test_uuid_is_unique_per_transcript_only(
+        self, make_store: StoreFactory
+    ) -> None:
+        store = await make_store()
+        sub: SessionKey = {**KEY, "subpath": "subagents/agent-1"}
+        other: SessionKey = {"project_key": "proj", "session_id": "other"}
+        for key in (KEY, sub, other, KEY):
+            await store.append(key, [_e("a")])
+        for key in (KEY, sub, other):
+            assert await store.load(key) == [_e("a")]

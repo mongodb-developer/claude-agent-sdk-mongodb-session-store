@@ -37,6 +37,7 @@ Three collections share a single database:
       session_id:  str,
       subpath:     str,                 # "" sentinel for main transcript
       position:    int,                 # append order, from the counter
+      uuid:        str,                 # entry["uuid"], when it has one
       entry:       <opaque JSON>,
       mtime:       int,                 # Unix epoch ms, write-time stamp
     }
@@ -109,7 +110,7 @@ from claude_agent_sdk import (
     fold_session_summary,
 )
 from pymongo import ReturnDocument
-from pymongo.errors import InvalidName
+from pymongo.errors import BulkWriteError, InvalidName
 
 if TYPE_CHECKING:
     from pymongo import AsyncMongoClient
@@ -240,6 +241,12 @@ class MongoDBSessionStore(SessionStore):
             # The counter already hands out each position once; this enforces it.
             unique=True,
         )
+        await self._entries.create_index(
+            [("project_key", 1), ("session_id", 1), ("subpath", 1), ("uuid", 1)],
+            name="key_uuid_idx",
+            unique=True,
+            partialFilterExpression={"uuid": {"$type": "string"}},
+        )
         # Ordered so list_sessions() can DISTINCT_SCAN: one key per session.
         await self._entries.create_index(
             [("project_key", 1), ("subpath", 1), ("session_id", 1), ("mtime", -1)],
@@ -282,6 +289,24 @@ class MongoDBSessionStore(SessionStore):
         assert doc is not None  # For typing. upsert=True with AFTER never returns None.
         return int(doc["last_position"]) - n + 1
 
+    async def _insert_new(self, docs: list[dict[str, Any]]) -> None:
+        """Insert ``docs``, skipping any whose ``uuid`` is already stored in
+        the same transcript.
+
+        The SDK retries a failed ``append()`` with the same batch, and treats
+        an entry's ``uuid`` as its idempotency key. Unordered, so the entries
+        after a duplicate are still inserted; order comes from ``position``.
+        """
+        try:
+            await self._entries.insert_many(docs, ordered=False)
+        except BulkWriteError as e:
+            errors = e.details["writeErrors"]
+            if e.details.get("writeConcernErrors") or not all(
+                err["code"] == 11000 and "uuid" in err.get("keyPattern", {})
+                for err in errors
+            ):
+                raise
+
     # ------------------------------------------------------------------
     # SessionStore protocol
     # ------------------------------------------------------------------
@@ -303,7 +328,10 @@ class MongoDBSessionStore(SessionStore):
             }
             for i, entry in enumerate(entries)
         ]
-        await self._entries.insert_many(docs, ordered=True)
+        for doc in docs:
+            if isinstance(doc["entry"].get("uuid"), str):
+                doc["uuid"] = doc["entry"]["uuid"]
+        await self._insert_new(docs)
 
         # Subagent transcripts must NOT contribute to the main session's
         # summary — guard before the fold (per fold_session_summary docs).
