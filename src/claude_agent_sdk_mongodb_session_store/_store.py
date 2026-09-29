@@ -1,8 +1,8 @@
 """MongoDB-backed :class:`~claude_agent_sdk.SessionStore`.
 
 Originally contributed as a reference adapter in
-anthropics/claude-agent-sdk-python#1014. It mirrors the
-``MongoDBSessionStore`` reference implementation from the TypeScript SDK.
+anthropics/claude-agent-sdk-python#1014, itself a port of the
+``MongoDBSessionStore`` reference implementation in the TypeScript SDK.
 
 Requires ``pymongo>=4.13`` (the stable async API). Install with::
 
