@@ -47,9 +47,10 @@ incrementally inside :meth:`MongoDBSessionStore.append` via
 :func:`~claude_agent_sdk.fold_session_summary`::
 
     {
-      _id:   {project_key: str, session_id: str},
-      mtime: int,                       # Unix epoch ms (same clock as entries)
-      data:  <opaque SDK-owned dict>,
+      _id:           {project_key: str, session_id: str},
+      mtime:         int,               # Unix epoch ms (same clock as entries)
+      last_position: int,               # last main-transcript entry folded in
+      data:          <opaque SDK-owned dict>,
     }
 
 ``claude_session_counters`` — one document per transcript, holding the last
@@ -289,9 +290,9 @@ class MongoDBSessionStore(SessionStore):
         assert doc is not None  # For typing. upsert=True with AFTER never returns None.
         return int(doc["last_position"]) - n + 1
 
-    async def _insert_new(self, docs: list[dict[str, Any]]) -> None:
+    async def _insert_new(self, docs: list[dict[str, Any]]) -> bool:
         """Insert ``docs``, skipping any whose ``uuid`` is already stored in
-        the same transcript.
+        the same transcript. Returns whether none were skipped.
 
         The SDK retries a failed ``append()`` with the same batch, and treats
         an entry's ``uuid`` as its idempotency key. Unordered, so the entries
@@ -306,6 +307,71 @@ class MongoDBSessionStore(SessionStore):
                 for err in errors
             ):
                 raise
+            return False
+        return True
+
+    async def _update_summary(
+        self,
+        key: SessionKey,
+        entries: list[SessionStoreEntry],
+        first_position: int,
+        mtime: int,
+        all_new: bool,
+    ) -> None:
+        """Fold a main-transcript batch into the session's summary.
+
+        The summary records the last position it has folded in. When this
+        batch directly follows it and none of its entries were skipped as
+        duplicates, only the batch is folded in, and ``mtime`` only moves
+        forward. Otherwise (a retry, a re-sent entry, or appends folding out
+        of order) the summary is rebuilt from every stored entry. Folding an
+        old entry again would roll its last-wins fields back.
+        """
+        compound_id = {
+            "project_key": key["project_key"],
+            "session_id": key["session_id"],
+        }
+        async with self._summary_lock(key):
+            prev_doc = await self._summaries.find_one({"_id": compound_id})
+            prev: SessionSummaryEntry | None = (
+                {
+                    "session_id": prev_doc["_id"]["session_id"],
+                    "mtime": int(prev_doc["mtime"]),
+                    "data": prev_doc["data"],
+                }
+                if prev_doc is not None
+                else None
+            )
+            last_position = prev_doc.get("last_position") if prev_doc else 0
+            if all_new and last_position == first_position - 1:
+                new_doc = {
+                    "_id": compound_id,
+                    "mtime": max(mtime, prev["mtime"]) if prev else mtime,
+                    "last_position": first_position + len(entries) - 1,
+                    "data": fold_session_summary(prev, key, entries)["data"],
+                }
+            else:
+                stored = (
+                    await self._entries.find(
+                        {**compound_id, "subpath": _MAIN},
+                        {"entry": 1, "position": 1, "mtime": 1},
+                    )
+                    .sort("position", 1)
+                    .to_list(length=None)
+                )
+                if not stored:
+                    return
+                new_doc = {
+                    "_id": compound_id,
+                    "mtime": max(d["mtime"] for d in stored),
+                    "last_position": stored[-1]["position"],
+                    "data": fold_session_summary(
+                        None, key, [d["entry"] for d in stored]
+                    )["data"],
+                }
+            await self._summaries.replace_one(
+                {"_id": compound_id}, new_doc, upsert=True
+            )
 
     # ------------------------------------------------------------------
     # SessionStore protocol
@@ -331,37 +397,11 @@ class MongoDBSessionStore(SessionStore):
         for doc in docs:
             if isinstance(doc["entry"].get("uuid"), str):
                 doc["uuid"] = doc["entry"]["uuid"]
-        await self._insert_new(docs)
-
+        all_new = await self._insert_new(docs)
         # Subagent transcripts must NOT contribute to the main session's
         # summary — guard before the fold (per fold_session_summary docs).
-        if subpath != _MAIN:
-            return
-
-        compound_id = {
-            "project_key": key["project_key"],
-            "session_id": key["session_id"],
-        }
-        async with self._summary_lock(key):
-            prev_doc = await self._summaries.find_one({"_id": compound_id})
-            prev: SessionSummaryEntry | None = (
-                {
-                    "session_id": prev_doc["_id"]["session_id"],
-                    "mtime": int(prev_doc["mtime"]),
-                    "data": prev_doc["data"],
-                }
-                if prev_doc is not None
-                else None
-            )
-            folded = fold_session_summary(prev, key, entries)
-            new_doc = {
-                "_id": compound_id,
-                "mtime": now,
-                "data": folded["data"],
-            }
-            await self._summaries.replace_one(
-                {"_id": compound_id}, new_doc, upsert=True
-            )
+        if subpath == _MAIN:
+            await self._update_summary(key, entries, first_position, now, all_new)
 
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         cursor = self._entries.find(

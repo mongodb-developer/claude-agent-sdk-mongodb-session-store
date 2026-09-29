@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import bson.objectid
 import pytest
 from claude_agent_sdk import SessionKey
@@ -161,3 +162,70 @@ class TestIdempotency:
             await store.append(key, [_e("a")])
         for key in (KEY, sub, other):
             assert await store.load(key) == [_e("a")]
+
+
+class TestSummaryFold:
+    @pytest.mark.anyio
+    async def test_late_fold_does_not_overwrite_newer_summary(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Append A stores its entries, then stalls before folding. Append B
+        stores and folds a newer title. A's late fold must not bring the old
+        title back, nor move the summary's ``mtime`` behind the entries'."""
+        store = await make_store()
+        clock = iter(range(1_000, 2_000))
+        monkeypatch.setattr(_store, "time", SimpleNamespace(time=lambda: next(clock)))
+
+        a_inserted, release_a = anyio.Event(), anyio.Event()
+        real_insert_many = store._entries.insert_many
+
+        async def insert_many(docs: list[dict[str, Any]], **kwargs: Any) -> Any:
+            result = await real_insert_many(docs, **kwargs)
+            if docs[0]["entry"].get("customTitle") == "old":
+                a_inserted.set()
+                await release_a.wait()
+            return result
+
+        monkeypatch.setattr(store._entries, "insert_many", insert_many)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, KEY, [_e("a", customTitle="old")])
+            await a_inserted.wait()
+            await store.append(KEY, [_e("b", customTitle="new")])
+            release_a.set()
+
+        [summary] = await store.list_session_summaries("proj")
+        assert summary["data"]["custom_title"] == "new"
+        [listed] = await store.list_sessions("proj")
+        assert summary["mtime"] == listed["mtime"]
+
+    @pytest.mark.anyio
+    async def test_resent_entry_does_not_roll_back_summary(
+        self, make_store: StoreFactory
+    ) -> None:
+        """An already-stored entry that arrives again is skipped, and must not
+        be folded again: re-applying its last-wins fields would roll the
+        summary back."""
+        store = await make_store()
+        await store.append(KEY, [_e("a", customTitle="old")])
+        await store.append(KEY, [_e("b", customTitle="new")])
+        await store.append(KEY, [_e("a", customTitle="old")])
+
+        [summary] = await store.list_session_summaries("proj")
+        assert summary["data"]["custom_title"] == "new"
+
+    @pytest.mark.anyio
+    async def test_summary_mtime_never_moves_backward(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A writer whose clock runs behind must not make the summary look
+        older than the session. ``list_sessions_from_store()`` treats a
+        summary older than ``list_sessions()`` as stale."""
+        store = await make_store()
+        for clock in (2_000, 1_000):
+            monkeypatch.setattr(_store, "time", SimpleNamespace(time=lambda c=clock: c))
+            await store.append(KEY, [_e(f"u{clock}")])
+
+        [summary] = await store.list_session_summaries("proj")
+        [listed] = await store.list_sessions("proj")
+        assert summary["mtime"] == listed["mtime"] == 2_000_000

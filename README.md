@@ -56,9 +56,10 @@ Summaries — one document per main session, maintained incrementally inside
 
 ```python
 {
-  "_id":   {"project_key": str, "session_id": str},
-  "mtime": int,           # epoch ms (same clock as entries)
-  "data":  <opaque>,      # SDK-owned summary state, persisted verbatim
+  "_id":           {"project_key": str, "session_id": str},
+  "mtime":         int,       # epoch ms (same clock as entries)
+  "last_position": int,       # last main-transcript entry folded in
+  "data":          <opaque>,  # SDK-owned summary state, persisted verbatim
 }
 ```
 
@@ -101,6 +102,13 @@ The summary itself is computed by the SDK's
 `fold_session_summary` (read inside `append()` and written back as one
 opaque `data` blob); the adapter never interprets the contents.
 `fold_session_summary` is exported from `claude_agent_sdk` as of 0.1.65.
+
+Normally `append()` folds only its own batch into the summary. The summary
+records the last entry position it has folded in. If a batch doesn't directly
+follow that position, or some of its entries were skipped as duplicates (a
+retry, a re-sent entry, or appends finishing out of order), the summary is
+rebuilt from the stored transcript instead. The summary's `mtime` never
+moves backwards and matches the newest entry's.
 
 ## Retries
 

@@ -120,6 +120,23 @@ class TestSummariesPlan:
         assert record["docsExamined"] == 3
 
 
+class TestAppendPlan:
+    @pytest.mark.anyio
+    async def test_sequential_appends_fold_without_rereading_entries(
+        self, make_store: StoreFactory
+    ) -> None:
+        """In the normal case each append folds only its own batch into the
+        summary. Rebuilding the summary from every stored entry is reserved
+        for retries and out-of-order appends."""
+        store = await make_store()
+        key: SessionKey = {"project_key": "proj", "session_id": "s"}
+        async with _profiling(store):
+            for i in range(5):
+                await store.append(key, [{"type": "user", "uuid": f"u{i}"}])
+
+        assert await _profiled(store, store._entries, op="query") == []
+
+
 class TestDeleteInactivePlan:
     @pytest.mark.anyio
     async def test_sweep_reads_one_counter_per_transcript_and_no_entries(
