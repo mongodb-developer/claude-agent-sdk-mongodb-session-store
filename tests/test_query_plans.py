@@ -6,8 +6,10 @@ the server's own record of how the command executed.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -116,3 +118,31 @@ class TestSummariesPlan:
         )
         assert record["planSummary"].startswith("IXSCAN"), record["planSummary"]
         assert record["docsExamined"] == 3
+
+
+class TestDeleteInactivePlan:
+    @pytest.mark.anyio
+    async def test_sweep_reads_one_counter_per_transcript_and_no_entries(
+        self, make_store: StoreFactory
+    ) -> None:
+        """Finding idle sessions reads the small counters collection (one
+        document per transcript), never the entries."""
+        n_sessions, n_entries = 5, 200
+        store = await make_store()
+        for s in range(n_sessions):
+            key: SessionKey = {"project_key": "proj", "session_id": f"s{s}"}
+            await store.append(
+                key, [{"type": "user", "n": i} for i in range(n_entries)]
+            )
+            await store.append({**key, "subpath": "subagents/a"}, [{"type": "user"}])
+        await store._counters.update_many(
+            {}, {"$set": {"mtime": int(time.time() * 1000) - 40 * 86_400_000}}
+        )
+
+        async with _profiling(store):
+            assert await store.delete_inactive(timedelta(days=30)) == n_sessions
+
+        aggregate = {"command.aggregate": {"$exists": True}}
+        [record] = await _profiled(store, store._counters, **aggregate)
+        assert record["docsExamined"] == 2 * n_sessions
+        assert await _profiled(store, store._entries, **aggregate) == []

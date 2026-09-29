@@ -52,11 +52,13 @@ incrementally inside :meth:`MongoDBSessionStore.append` via
     }
 
 ``claude_session_counters`` — one document per transcript, holding the last
-``seq`` reserved by :meth:`MongoDBSessionStore.append`::
+``seq`` reserved by :meth:`MongoDBSessionStore.append` and the time of the
+latest append::
 
     {
-      _id: {project_key: str, session_id: str, subpath: str},
-      seq: int,
+      _id:   {project_key: str, session_id: str, subpath: str},
+      seq:   int,
+      mtime: int,                       # Unix epoch ms (same clock as entries)
     }
 
 The empty string is the ``subpath`` sentinel for the main transcript so the
@@ -76,17 +78,24 @@ the fold deterministic in that case.
 
 Retention
 ---------
-This adapter never deletes documents on its own. Add a TTL index on ``mtime``
-or a scheduled ``delete_many({"mtime": {"$lt": cutoff}})`` to expire
-transcripts according to your compliance requirements. Local-disk
-transcripts under ``CLAUDE_CONFIG_DIR`` are swept independently by the CLI's
-``cleanupPeriodDays`` setting.
+This adapter never deletes documents on its own. Schedule
+:meth:`MongoDBSessionStore.delete_inactive` to remove sessions that have had
+no appends for a given period. It deletes whole sessions only.
+
+Don't expire individual entries (a TTL index, or
+``delete_many({"mtime": {"$lt": cutoff}})``): that deletes the oldest entries
+of a session that is still in use, leaving a transcript that can't be resumed.
+TTL indexes also ignore ``mtime``, which is an integer, not a BSON Date.
+
+Local-disk transcripts under ``CLAUDE_CONFIG_DIR`` are swept independently by
+the CLI's ``cleanupPeriodDays`` setting.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -245,8 +254,13 @@ class MongoDBSessionStore(SessionStore):
             name="counters_session_idx",
         )
 
-    async def _reserve_seq(self, key: SessionKey, subpath: str, n: int) -> int:
+    async def _reserve_seq(
+        self, key: SessionKey, subpath: str, n: int, mtime: int
+    ) -> int:
         """Atomically reserve ``n`` sequence numbers and return the first.
+
+        Also records ``mtime`` as the transcript's latest append time, which
+        :meth:`delete_inactive` reads.
 
         The counter is incremented on the server, so reservations are totally
         ordered even across processes with skewed clocks. Ordering by
@@ -261,7 +275,7 @@ class MongoDBSessionStore(SessionStore):
                     "subpath": subpath,
                 }
             },
-            {"$inc": {"seq": n}},
+            {"$inc": {"seq": n}, "$max": {"mtime": mtime}},
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
@@ -276,8 +290,8 @@ class MongoDBSessionStore(SessionStore):
         if not entries:
             return
         subpath = key.get("subpath") or _MAIN
-        first_seq = await self._reserve_seq(key, subpath, len(entries))
         now = int(time.time() * 1000)
+        first_seq = await self._reserve_seq(key, subpath, len(entries), now)
         docs: list[dict[str, Any]] = [
             {
                 "project_key": key["project_key"],
@@ -414,3 +428,45 @@ class MongoDBSessionStore(SessionStore):
             },
         )
         return list(result)
+
+    # ------------------------------------------------------------------
+    # Retention
+    # ------------------------------------------------------------------
+
+    async def delete_inactive(self, older_than: timedelta) -> int:
+        """Delete every session with no appends for ``older_than``.
+
+        A session counts as active if any of its transcripts, main or
+        subagent, was appended to since the cutoff. Inactive sessions are
+        removed whole via :meth:`delete`, so a long-running session is never
+        truncated. Covers every project. Returns the number of sessions
+        deleted.
+
+        Run it on a schedule (cron, an Atlas scheduled trigger, ...). A
+        session appended to at the moment the sweep deletes it can still be
+        lost, having been idle for ``older_than`` until then.
+        """
+        if older_than <= timedelta(0):
+            raise ValueError(f"older_than must be positive, got {older_than!r}")
+        cutoff = int(time.time() * 1000) - older_than // timedelta(milliseconds=1)
+        pipeline: list[dict[str, Any]] = [
+            {
+                "$group": {
+                    "_id": {
+                        "project_key": "$_id.project_key",
+                        "session_id": "$_id.session_id",
+                    },
+                    "mtime": {"$max": "$mtime"},
+                }
+            },
+            {"$match": {"mtime": {"$lt": cutoff}}},
+        ]
+        idle = [r["_id"] async for r in await self._counters.aggregate(pipeline)]
+        for session in idle:
+            await self.delete(
+                {
+                    "project_key": session["project_key"],
+                    "session_id": session["session_id"],
+                }
+            )
+        return len(idle)

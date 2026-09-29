@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -100,3 +101,15 @@ class TestCollectionNames:
         )
         assert store._entries.name == name
         assert store._summaries.name == f"{name}_s"
+
+
+class TestDeleteInactiveValidation:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("older_than", [timedelta(0), timedelta(days=-1)])
+    async def test_rejects_non_positive_age(
+        self, offline_client: Client, older_than: timedelta
+    ) -> None:
+        # Raises before any I/O: the offline client would fail to connect.
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        with pytest.raises(ValueError, match="older_than"):
+            await store.delete_inactive(older_than)

@@ -61,12 +61,14 @@ Summaries — one document per main session, maintained incrementally inside
 }
 ```
 
-Counters — one document per transcript, holding the last `seq` reserved:
+Counters — one document per transcript, holding the last `seq` reserved
+and the time of the latest append:
 
 ```python
 {
     "_id": {"project_key": str, "session_id": str, "subpath": str},
     "seq": int,
+    "mtime": int,  # epoch ms (same clock as entries)
 }
 ```
 
@@ -107,10 +109,26 @@ session. The adapter holds a per-session `anyio.Lock` keyed by
 
 ## Retention
 
-This adapter never deletes documents on its own. Add a TTL index on
-`mtime` (the entries collection's `mtime` is epoch ms; convert to seconds
-or use a `Date` field instead) or schedule a `delete_many({"mtime": {"$lt":
-cutoff}})` to expire transcripts according to your compliance requirements.
+This adapter never deletes documents on its own. Run
+`delete_inactive()` on a schedule (cron, an Atlas scheduled trigger, ...) to
+delete every session with no appends for a given period:
+
+```python
+from datetime import timedelta
+
+deleted = await store.delete_inactive(timedelta(days=30))
+```
+
+A session is active if any of its transcripts, main or subagent, was
+appended to within the period. Sessions are deleted whole, in every project.
+The sweep reads only the counters collection, one small document per
+transcript, never the entries.
+
+Don't expire individual entries with a TTL index or a
+`delete_many({"mtime": {"$lt": cutoff}})`. Both delete the oldest entries of
+a session that is still in use, leaving a transcript that can't be resumed.
+A TTL index would also do nothing here: TTL needs a BSON `Date`, and `mtime`
+is an integer.
 
 `delete()` is implemented (cascades to subpath documents and the summary
 sidecar) but is only called when you invoke `delete_session_via_store()`
@@ -159,8 +177,8 @@ SDK's [`examples/session-stores/mongodb/`](https://github.com/anthropics/claude-
   serializes per-session updates with an `anyio.Lock`, but multi-process
   writers against the same session would still race — pin a session to a
   single writer or layer your own coordination on top.
-- Implement retention via a TTL index on `mtime` or a scheduled
-  `delete_many` — both collections grow unbounded.
+- Schedule `delete_inactive()` for retention — every collection grows
+  unbounded otherwise.
 
 ## Credits
 
