@@ -2,13 +2,13 @@
 
 There is no in-process MongoDB mock that faithfully exercises aggregation
 and ``distinct``, so these tests are **live-only**: the ``client`` fixture
-skips unless ``SESSION_STORE_MONGODB_URL`` is set. Each test uses a random
+skips unless ``MONGODB_URI`` is set. Each test uses a random
 database name and drops it on teardown.
 
 Run locally::
 
     docker run -d -p 27017:27017 mongo:latest
-    SESSION_STORE_MONGODB_URL=mongodb://localhost:27017 \\
+    MONGODB_URI=mongodb://localhost:27017 \\
         uv run pytest tests/test_mongodb_session_store.py -v
 """
 

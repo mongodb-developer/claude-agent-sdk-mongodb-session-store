@@ -201,13 +201,13 @@ async for message in query(
 
 There is no in-process MongoDB mock that faithfully exercises aggregation,
 `distinct`, or the query planner, so every test that touches the store runs
-**live-only**. Those tests skip unless `SESSION_STORE_MONGODB_URL` is set; the
+**live-only**. Those tests skip unless `MONGODB_URI` is set; the
 constructor and validation tests always run.
 
 ```bash
 docker run -d -p 27017:27017 mongo:latest
 
-SESSION_STORE_MONGODB_URL=mongodb://localhost:27017 uv run pytest -v
+MONGODB_URI=mongodb://localhost:27017 uv run pytest -v
 ```
 
 Each test uses a random database name and drops it on teardown. The query-plan

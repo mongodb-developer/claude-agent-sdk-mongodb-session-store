@@ -1,9 +1,8 @@
 """Shared fixtures.
 
-Tests that need a server request the ``client`` (or ``mongodb_url``) fixture,
-which skips unless ``SESSION_STORE_MONGODB_URL`` is set. Tests that only
-construct a store use ``offline_client``, which never connects, so they run
-everywhere.
+Tests that need a server request the ``client`` (or ``mongodb_uri``) fixture,
+which skips unless ``MONGODB_URI`` is set. Tests that only construct a store
+use ``offline_client``, which never connects, so they run everywhere.
 """
 
 from __future__ import annotations
@@ -19,8 +18,6 @@ from pymongo import AsyncMongoClient
 
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
-MONGODB_URL_ENV = "SESSION_STORE_MONGODB_URL"
-
 
 @pytest.fixture
 def anyio_backend() -> str:
@@ -29,18 +26,18 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture(scope="session")
-def mongodb_url() -> str:
-    url = os.environ.get(MONGODB_URL_ENV)
-    if not url:
+def mongodb_uri() -> str:
+    uri = os.environ.get("MONGODB_URI")
+    if not uri:
         pytest.skip(
-            f"live MongoDB e2e: set {MONGODB_URL_ENV} (e.g. mongodb://localhost:27017)"
+            "live MongoDB e2e: set MONGODB_URI (e.g. mongodb://localhost:27017)"
         )
-    return url
+    return uri
 
 
 @pytest.fixture
-async def client(mongodb_url: str) -> AsyncIterator[AsyncMongoClient[dict[str, Any]]]:
-    c: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(mongodb_url)
+async def client(mongodb_uri: str) -> AsyncIterator[AsyncMongoClient[dict[str, Any]]]:
+    c: AsyncMongoClient[dict[str, Any]] = AsyncMongoClient(mongodb_uri)
     try:
         yield c
     finally:
