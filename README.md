@@ -1,9 +1,6 @@
 # claude-agent-sdk-mongodb-session-store
 
-MongoDB-backed `SessionStore` for the
-[Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python).
-
-Backed by the official [`pymongo`](https://www.mongodb.com/docs/drivers/pymongo/)
+MongoDB `SessionStore` for the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) backed by the official [`pymongo`](https://www.mongodb.com/docs/drivers/pymongo/)
 driver via its stable async API (`pymongo.AsyncMongoClient`, introduced in
 pymongo 4.13).
 
@@ -41,18 +38,29 @@ or one in the reserved `system.` namespace, raises `ValueError`.
 
 ## Schema
 
-Three collections share a single database. Entries — one document per
-transcript entry, ordered by `position`:
+A *transcript* is the record of one conversation that Claude Code writes as
+it runs: a JSONL file with one entry per line (user prompts, assistant
+replies, tool calls and results, plus metadata such as a custom title). A
+*session* has a main transcript and one more for each subagent it starts.
+Locally they live at `~/.claude/projects/<project_key>/<session_id>.jsonl`
+and `<session_id>/subagents/agent-<id>.jsonl`.
+
+In the store, a transcript is identified by `(project_key, session_id,
+subpath)`, where `subpath` is `""` for the main transcript and, for example,
+`subagents/agent-1` for a subagent's. Three collections share a single
+database.
+
+Entries — one document per transcript entry, ordered by `position`:
 
 ```python
 {
   "_id": ObjectId,
   "project_key": str,
   "session_id":  str,
-  "subpath":     str,    # "" sentinel for the main transcript
+  "subpath":     str,    # "" for the main transcript
   "position":    int,    # per-transcript append order
   "uuid":        str,    # entry["uuid"], when it has one
-  "entry":       <opaque JSON>,
+  "entry":       <opaque JSON>, # single jsonl line
   "mtime":       int,    # Unix epoch ms, write-time stamp
 }
 ```
@@ -70,8 +78,10 @@ Summaries — one document per main session, maintained incrementally inside
 }
 ```
 
-Counters — one document per transcript, holding the last `position` reserved
-and the time of the latest append:
+Counters — one document per transcript. It guarantees the order of entries
+written by different processes: each `append()` reserves the next block of
+`position`s from it. It also records the time of the latest append, which
+`delete_inactive()` reads instead of scanning entries:
 
 ```python
 {
@@ -95,7 +105,7 @@ read one index key per session (a `DISTINCT_SCAN`), `(_id.project_key)` on the
 summaries collection, and `(_id.project_key, _id.session_id)` on the counters
 collection for cascade deletes.
 
-## Why a summary sidecar?
+## Why a summary sidecar? The optional `list_session_summaries` method
 
 Unlike the S3, Redis, and Postgres reference adapters in the SDK's
 `examples/session_stores/` directory, this adapter implements the optional
