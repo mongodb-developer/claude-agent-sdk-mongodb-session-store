@@ -81,7 +81,9 @@ Summaries — one document per main session, maintained incrementally inside
 Counters — one document per transcript. It guarantees the order of entries
 written by different processes: each `append()` reserves the next block of
 `position`s from it. It also records the time of the latest append, which
-`delete_inactive()` reads instead of scanning entries:
+`delete_inactive()` reads instead of scanning entries. `delete()` keeps it, so
+an append racing the delete can't restart positions at 1; `delete_inactive()`
+removes it once idle:
 
 ```python
 {
@@ -103,7 +105,7 @@ subpath, position)` serving `load()`/`delete()`/`list_subkeys()`, a unique
 `(project_key, subpath, session_id, mtime DESC)` that lets `list_sessions()`
 read one index key per session (a `DISTINCT_SCAN`), `(_id.project_key)` on the
 summaries collection, and `(_id.project_key, _id.session_id)` on the counters
-collection for cascade deletes.
+collection for `delete_inactive()`.
 
 ## Why a summary sidecar? The optional `list_session_summaries` method
 
@@ -177,8 +179,8 @@ a session that is still in use, leaving a transcript that can't be resumed.
 A TTL index would also do nothing here: TTL needs a BSON `Date`, and `mtime`
 is an integer.
 
-`delete()` is implemented (cascades to subpath documents, counters and the
-summary sidecar) but is only called when you invoke `delete_session_via_store()`
+`delete()` is implemented (cascades to subpath documents and the summary
+sidecar) but is only called when you invoke `delete_session_via_store()`
 from the SDK.
 
 Local-disk transcripts under `CLAUDE_CONFIG_DIR` are swept independently by

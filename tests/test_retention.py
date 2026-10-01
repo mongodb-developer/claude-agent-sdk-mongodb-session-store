@@ -90,3 +90,37 @@ class TestDeleteInactive:
         await store.append(_key("s"), [{"type": "user"}])
         assert await store.delete_inactive(timedelta(days=30)) == 0
         assert await store.load(_key("s")) == [{"type": "user"}]
+
+    @pytest.mark.anyio
+    async def test_removes_counters_left_by_delete_without_counting_them(
+        self, make_store: StoreFactory
+    ) -> None:
+        store = await make_store()
+        await store.append(_key("gone"), [{"type": "user"}])
+        await store.delete(_key("gone"))
+        await _age(store, 40, session_id="gone")
+
+        assert await store.delete_inactive(timedelta(days=30)) == 0
+        assert await store._counters.count_documents({}) == 0
+
+    @pytest.mark.anyio
+    async def test_keeps_the_counter_of_a_transcript_appended_to_during_the_sweep(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The sweep found the session idle, then an append reserved positions
+        before the sweep deleted it. The counter must survive so the append's
+        entries, if they land, keep their place."""
+        store = await make_store()
+        await store.append(_key("s"), [{"type": "user"}])
+        await _age(store, 40, session_id="s")
+        real_delete_many = store._entries.delete_many
+
+        async def delete_many(*args: Any, **kwargs: Any) -> Any:
+            await store._reserve_positions(_key("s"), "", 1, int(time.time() * 1000))
+            return await real_delete_many(*args, **kwargs)
+
+        monkeypatch.setattr(store._entries, "delete_many", delete_many)
+        await store.delete_inactive(timedelta(days=30))
+
+        [counter] = [d async for d in store._counters.find({})]
+        assert counter["last_position"] == 2

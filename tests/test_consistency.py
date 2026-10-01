@@ -135,29 +135,25 @@ class TestOrdering:
         await store._entries.insert_one({**doc, "session_id": "other"})
 
     @pytest.mark.anyio
-    async def test_delete_removes_counters(self, make_store: StoreFactory) -> None:
+    async def test_delete_keeps_counters(self, make_store: StoreFactory) -> None:
+        """A transcript appended to after its delete continues numbering
+        rather than starting again at 1, so it sorts after any batch that was
+        in flight during the delete."""
         store = await make_store()
         sub: SessionKey = {**KEY, "subpath": "subagents/agent-1"}
-        other: SessionKey = {"project_key": "proj", "session_id": "other"}
         await store.append(KEY, [_e("a")])
         await store.append(sub, [_e("s")])
-        await store.append(other, [_e("o")])
 
         await store.delete(sub)
-        remaining = [d["_id"] async for d in store._counters.find({})]
-        assert sorted((r["session_id"], r["subpath"]) for r in remaining) == [
-            ("other", ""),
-            ("sess", ""),
-        ]
-
         await store.delete(KEY)
-        remaining = [d["_id"] async for d in store._counters.find({})]
-        assert remaining == [
-            {"project_key": "proj", "session_id": "other", "subpath": ""}
-        ]
-
-        # A fresh transcript under a deleted key starts numbering again.
         await store.append(KEY, [_e("b")])
+        await store.append(sub, [_e("t")])
+
+        positions = [
+            (d["subpath"], d["position"])
+            async for d in store._entries.find({}).sort("subpath", 1)
+        ]
+        assert positions == [("", 2), (sub["subpath"], 2)]
         assert await store.load(KEY) == [_e("b")]
 
 

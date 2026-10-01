@@ -56,7 +56,9 @@ incrementally inside :meth:`MongoDBSessionStore.append` via
 
 ``claude_session_counters`` — one document per transcript, holding the last
 ``position`` reserved by :meth:`MongoDBSessionStore.append` and the time of the
-latest append::
+latest append. It outlives :meth:`MongoDBSessionStore.delete`, so positions
+never restart, until :meth:`MongoDBSessionStore.delete_inactive` finds it
+idle::
 
     {
       _id:           {project_key: str, session_id: str, subpath: str},
@@ -484,10 +486,17 @@ class MongoDBSessionStore(SessionStore):
         ]
 
     async def delete(self, key: SessionKey) -> None:
+        """Delete a transcript, or a whole session when ``key`` has no
+        ``subpath``.
+
+        Counters are kept. An append may have reserved positions and not yet
+        inserted; if its entries land after the delete, a later append must
+        still sort after them. :meth:`delete_inactive` removes counters once
+        they are idle.
+        """
         subpath = key.get("subpath")
         if subpath:
-            # Targeted: remove only this subpath's entries; do NOT touch the
-            # summary sidecar (which represents the main transcript).
+            # The summary sidecar represents the main transcript; leave it.
             await self._entries.delete_many(
                 {
                     "project_key": key["project_key"],
@@ -495,38 +504,19 @@ class MongoDBSessionStore(SessionStore):
                     "subpath": subpath,
                 }
             )
-            await self._counters.delete_one(
-                {
-                    "_id": {
-                        "project_key": key["project_key"],
-                        "session_id": key["session_id"],
-                        "subpath": subpath,
-                    }
-                }
-            )
             return
-        # Cascade: main + every subpath under (project_key, session_id),
-        # their position counters, and the summary sidecar.
-        await self._entries.delete_many(
-            {
-                "project_key": key["project_key"],
-                "session_id": key["session_id"],
-            }
-        )
-        await self._counters.delete_many(
-            {
-                "_id.project_key": key["project_key"],
-                "_id.session_id": key["session_id"],
-            }
+        await self._delete_session(key["project_key"], key["session_id"])
+
+    async def _delete_session(self, project_key: str, session_id: str) -> int:
+        """Delete every entry, main and subagent, then the summary. Returns
+        the number of entries deleted."""
+        result = await self._entries.delete_many(
+            {"project_key": project_key, "session_id": session_id}
         )
         await self._summaries.delete_one(
-            {
-                "_id": {
-                    "project_key": key["project_key"],
-                    "session_id": key["session_id"],
-                }
-            }
+            {"_id": {"project_key": project_key, "session_id": session_id}}
         )
+        return result.deleted_count
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
         result = await self._entries.distinct(
@@ -548,9 +538,12 @@ class MongoDBSessionStore(SessionStore):
 
         A session counts as active if any of its transcripts, main or
         subagent, was appended to since the cutoff. Inactive sessions are
-        removed whole via :meth:`delete`, so a long-running session is never
-        truncated. Covers every project. Returns the number of sessions
+        removed whole, so a long-running session is never truncated. Covers
+        every project. Returns the number of sessions whose entries were
         deleted.
+
+        Also removes the counters :meth:`delete` leaves behind, once idle. A
+        counter an append has touched since the cutoff is kept.
 
         Run it on a schedule (cron, an Atlas scheduled trigger, ...). A
         session appended to at the moment the sweep deletes it can still be
@@ -572,11 +565,17 @@ class MongoDBSessionStore(SessionStore):
             {"$match": {"mtime": {"$lt": cutoff}}},
         ]
         idle = [r["_id"] async for r in await self._counters.aggregate(pipeline)]
+        deleted = 0
         for session in idle:
-            await self.delete(
+            if await self._delete_session(
+                session["project_key"], session["session_id"]
+            ):
+                deleted += 1
+            await self._counters.delete_many(
                 {
-                    "project_key": session["project_key"],
-                    "session_id": session["session_id"],
+                    "_id.project_key": session["project_key"],
+                    "_id.session_id": session["session_id"],
+                    "mtime": {"$lt": cutoff},
                 }
             )
-        return len(idle)
+        return deleted
