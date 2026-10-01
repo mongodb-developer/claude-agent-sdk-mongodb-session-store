@@ -6,6 +6,7 @@ These cover the correctness fixes from the PR #1014 review.
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,6 +48,35 @@ def _pause_after_summary_read(
 
     monkeypatch.setattr(store._summaries, "find_one", find_one)
     return read, release
+
+
+def _pause_before_insert(
+    store: MongoDBSessionStore, monkeypatch: pytest.MonkeyPatch
+) -> tuple[anyio.Event, anyio.Event]:
+    """Make the store's next entry insert stall until released, after the
+    append has reserved its positions.
+
+    Returns ``(reserved, release)``: ``reserved`` is set once the append is
+    about to insert, and it inserts when ``release`` is set.
+    """
+    reserved, release = anyio.Event(), anyio.Event()
+    real_insert_many = store._entries.insert_many
+
+    async def insert_many(*args: Any, **kwargs: Any) -> Any:
+        if not reserved.is_set():
+            reserved.set()
+            await release.wait()
+        return await real_insert_many(*args, **kwargs)
+
+    monkeypatch.setattr(store._entries, "insert_many", insert_many)
+    return reserved, release
+
+
+async def _age_all(store: MongoDBSessionStore, days: int) -> None:
+    """Backdate every entry and counter, as if idle for ``days``."""
+    aged = {"$set": {"mtime": int(time.time() * 1000) - days * 86_400_000}}
+    await store._entries.update_many({}, aged)
+    await store._counters.update_many({}, aged)
 
 
 class TestOrdering:
@@ -276,6 +306,84 @@ class TestDeleteRace:
 
         assert await store.list_session_summaries("proj") == []
         assert await store.load(KEY) is None
+
+    @pytest.mark.anyio
+    async def test_append_racing_delete_keeps_later_appends_after_it(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``delete()`` runs after an append has reserved its positions but
+        before it inserts. Its entries survive, as a session holding just
+        that batch, and a later append must still come after them."""
+        store = await make_store()
+        await store.append(KEY, [_e("a"), _e("b"), _e("c")])
+        reserved, release = _pause_before_insert(store, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, KEY, [_e("late")])
+            await reserved.wait()
+            await store.delete(KEY)
+            release.set()
+        await store.append(KEY, [_e("next")])
+
+        assert await store.load(KEY) == [_e("late"), _e("next")]
+
+    @pytest.mark.anyio
+    async def test_entries_left_by_append_racing_delete_are_swept(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = await make_store()
+        await store.append(KEY, [_e("a"), _e("b"), _e("c")])
+        reserved, release = _pause_before_insert(store, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, KEY, [_e("late")])
+            await reserved.wait()
+            await store.delete(KEY)
+            release.set()
+        await _age_all(store, 40)
+        await store.delete_inactive(timedelta(days=30))
+
+        assert await store.load(KEY) is None
+        assert await store.list_session_summaries("proj") == []
+
+    @pytest.mark.anyio
+    async def test_summary_left_by_first_append_racing_delete_is_swept(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A session's first append folds its batch without reading stored
+        entries. A ``delete()`` between its insert and its summary write
+        leaves a summary with no entries, which the sweep must remove."""
+        store = await make_store()
+        read, release = _pause_after_summary_read(store, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, KEY, [_e("a", customTitle="gone")])
+            await read.wait()
+            await store.delete(KEY)
+            release.set()
+        assert await store.load(KEY) is None
+        await _age_all(store, 40)
+        await store.delete_inactive(timedelta(days=30))
+
+        assert await store.list_session_summaries("proj") == []
+
+    @pytest.mark.anyio
+    async def test_subagent_append_racing_its_delete_keeps_order(
+        self, make_store: StoreFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = await make_store()
+        sub: SessionKey = {**KEY, "subpath": "subagents/agent-1"}
+        await store.append(sub, [_e("a"), _e("b"), _e("c")])
+        reserved, release = _pause_before_insert(store, monkeypatch)
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(store.append, sub, [_e("late")])
+            await reserved.wait()
+            await store.delete(sub)
+            release.set()
+        await store.append(sub, [_e("next")])
+
+        assert await store.load(sub) == [_e("late"), _e("next")]
 
 
 class TestAcrossProcesses:
