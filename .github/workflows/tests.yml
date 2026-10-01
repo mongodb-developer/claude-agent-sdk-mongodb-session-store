@@ -1,0 +1,118 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dev dependencies
+        run: uv sync --locked
+
+      - name: Check linting
+        run: uv run --no-sync ruff check .
+
+      - name: Check formatting
+        run: uv run --no-sync ruff format --check .
+
+      - name: Check types
+        run: uv run --no-sync mypy claude_agent_sdk_mongodb_session_store/ tests/
+
+  tests:
+    name: ${{ matrix.name }}
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Minimum — Python 3.10, Claude Agent SDK 0.1.66, PyMongo 4.13, MongoDB 7.0
+            python_version: "3.10"
+            sdk_spec: claude-agent-sdk==0.1.66
+            pymongo_spec: pymongo==4.13.0
+            mongodb_version: "7.0"
+          - name: Current — Python 3.14, latest Claude Agent SDK and PyMongo, MongoDB 9.0
+            python_version: "3.14"
+            sdk_spec: claude-agent-sdk
+            pymongo_spec: pymongo
+            mongodb_version: "9.0"
+    env:
+      MONGODB_URI: mongodb://localhost:27017
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python ${{ matrix.python_version }}
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ matrix.python_version }}
+          enable-cache: true
+
+      - name: Start MongoDB ${{ matrix.mongodb_version }}
+        uses: supercharge/mongodb-github-action@315db7fe45ac2880b7758f1933e6e5d59afd5e94 # 1.12.1
+        with:
+          mongodb-version: ${{ matrix.mongodb_version }}
+
+      - name: Install test stack
+        env:
+          SDK_SPEC: ${{ matrix.sdk_spec }}
+          PYMONGO_SPEC: ${{ matrix.pymongo_spec }}
+        run: |
+          uv sync --locked
+          uv pip install --python .venv --upgrade "$SDK_SPEC" "$PYMONGO_SPEC"
+
+      - name: Show installed versions
+        run: >-
+          uv run --no-sync python -c "import platform, claude_agent_sdk, pymongo;
+          print('Python', platform.python_version());
+          print('Claude Agent SDK', claude_agent_sdk.__version__);
+          print('PyMongo', pymongo.__version__)"
+
+      - name: Run tests
+        if: matrix.python_version == '3.10'
+        run: uv run --no-sync pytest
+
+      - name: Run tests with coverage
+        if: matrix.python_version == '3.14'
+        run: >-
+          uv run --no-sync pytest
+          --cov=claude_agent_sdk_mongodb_session_store
+          --cov-report=term-missing
+          --cov-report=html
+
+      - name: Upload HTML coverage report
+        if: always() && matrix.python_version == '3.14'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: html-coverage-report
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 14
