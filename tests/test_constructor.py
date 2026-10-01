@@ -83,8 +83,9 @@ class TestCollectionNames:
         self, offline_client: Client, field: str, name: str
     ) -> None:
         # Always ValueError (never pymongo's InvalidName), naming the field.
+        names: dict[str, Any] = {field: name}
         with pytest.raises(ValueError, match=field):
-            MongoDBSessionStore(client=offline_client, db_name="db", **{field: name})
+            MongoDBSessionStore(client=offline_client, db_name="db", **names)
 
     @pytest.mark.anyio
     @pytest.mark.parametrize(

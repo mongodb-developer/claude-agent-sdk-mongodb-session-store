@@ -9,7 +9,7 @@ uv run ruff check claude_agent_sdk_mongodb_session_store/ tests/ --fix
 uv run ruff format claude_agent_sdk_mongodb_session_store/ tests/
 
 # Typecheck
-uv run mypy claude_agent_sdk_mongodb_session_store/
+uv run mypy claude_agent_sdk_mongodb_session_store/ tests/
 
 # All pre-commit hooks (ruff, mypy, uv-lock, whitespace)
 uv run pre-commit run --all-files

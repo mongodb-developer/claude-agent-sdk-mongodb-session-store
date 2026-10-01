@@ -17,10 +17,12 @@ from __future__ import annotations
 import itertools
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from claude_agent_sdk import (
     ClaudeAgentOptions,
+    SessionKey,
     SessionStore,
     delete_session_via_store,
     get_session_messages_from_store,
@@ -42,6 +44,8 @@ from claude_agent_sdk_mongodb_session_store import (
     MongoDBSessionStoreOptions,
 )
 
+from .conftest import entry
+
 SESSION_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
@@ -51,7 +55,7 @@ SESSION_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 
 @pytest.fixture
-async def store(client: AsyncMongoClient, db_name: str) -> SessionStore:
+async def store(client: AsyncMongoClient[dict[str, Any]], db_name: str) -> SessionStore:
     s = MongoDBSessionStore(
         options=MongoDBSessionStoreOptions(client=client, db_name=db_name)
     )
@@ -66,7 +70,9 @@ async def store(client: AsyncMongoClient, db_name: str) -> SessionStore:
 
 class TestConformance:
     @pytest.mark.anyio
-    async def test_conformance(self, client: AsyncMongoClient, db_name: str) -> None:
+    async def test_conformance(
+        self, client: AsyncMongoClient[dict[str, Any]], db_name: str
+    ) -> None:
         # The harness calls make_store() once per contract for isolation.
         # Give each call its own collection pair so contracts don't see each
         # other's documents; cleanup happens via the db_name teardown.
@@ -95,7 +101,7 @@ class TestConformance:
 class TestAdapterSpecific:
     @pytest.mark.anyio
     async def test_create_schema_is_idempotent(
-        self, client: AsyncMongoClient, db_name: str
+        self, client: AsyncMongoClient[dict[str, Any]], db_name: str
     ) -> None:
         """Calling create_schema() twice must not raise (matches Postgres)."""
         s = MongoDBSessionStore(
@@ -112,7 +118,7 @@ class TestAdapterSpecific:
 
     @pytest.mark.anyio
     async def test_options_kwarg_path(
-        self, client: AsyncMongoClient, db_name: str
+        self, client: AsyncMongoClient[dict[str, Any]], db_name: str
     ) -> None:
         """The dataclass options= path must be equivalent to positional args."""
         s = MongoDBSessionStore(
@@ -129,7 +135,7 @@ class TestAdapterSpecific:
 
     @pytest.mark.anyio
     async def test_subpath_delete_preserves_summary(
-        self, client: AsyncMongoClient, db_name: str
+        self, client: AsyncMongoClient[dict[str, Any]], db_name: str
     ) -> None:
         """Targeted subpath delete must NOT touch the main session's summary
         sidecar. Only main delete (no subpath) cascades to the summary."""
@@ -140,8 +146,8 @@ class TestAdapterSpecific:
             summaries_collection="sub_del_summaries",
         )
         await s.create_schema()
-        key = {"project_key": "p", "session_id": "s"}
-        await s.append(key, [{"type": "user", "customTitle": "title"}])
+        key: SessionKey = {"project_key": "p", "session_id": "s"}
+        await s.append(key, [entry({"type": "user", "customTitle": "title"})])
         await s.append({**key, "subpath": "subagents/agent-1"}, [{"type": "user"}])
         # Sidecar exists after the main append.
         before = await s.list_session_summaries("p")
@@ -157,7 +163,7 @@ class TestAdapterSpecific:
 
     @pytest.mark.anyio
     async def test_concurrent_appends_serialize_summary_fold(
-        self, client: AsyncMongoClient, db_name: str
+        self, client: AsyncMongoClient[dict[str, Any]], db_name: str
     ) -> None:
         """Concurrent read-fold-writes must not lose each other's fields.
 
@@ -182,18 +188,20 @@ class TestAdapterSpecific:
         await s.create_schema()
 
         for trial in range(30):
-            key = {"project_key": "p", "session_id": f"trial-{trial}"}
+            key: SessionKey = {"project_key": "p", "session_id": f"trial-{trial}"}
 
             # Default-arg binds `key` at definition time so the closures
             # don't capture the mutating loop variable (ruff B023).
-            async def with_title(k: dict[str, str] = key) -> None:
+            async def with_title(k: SessionKey = key) -> None:
                 await s.append(
                     k,
-                    [{"type": "user", "uuid": "t", "customTitle": "TITLE"}],
+                    [entry({"type": "user", "uuid": "t", "customTitle": "TITLE"})],
                 )
 
-            async def with_branch(k: dict[str, str] = key) -> None:
-                await s.append(k, [{"type": "user", "uuid": "b", "gitBranch": "main"}])
+            async def with_branch(k: SessionKey = key) -> None:
+                await s.append(
+                    k, [entry({"type": "user", "uuid": "b", "gitBranch": "main"})]
+                )
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(with_title)
@@ -239,9 +247,9 @@ class TestRoundTrip:
         cwd.mkdir()
         project_key = project_key_for_directory(cwd)
 
-        errors: list[tuple] = []
+        errors: list[tuple[SessionKey | None, str]] = []
 
-        async def on_error(key, msg) -> None:
+        async def on_error(key: SessionKey | None, msg: str) -> None:
             errors.append((key, msg))
 
         projects_dir = str(tmp_path / "config" / "projects")
@@ -252,14 +260,18 @@ class TestRoundTrip:
         main_path = f"{projects_dir}/{project_key}/{SESSION_ID}.jsonl"
         sub_path = f"{projects_dir}/{project_key}/{SESSION_ID}/subagents/agent-1.jsonl"
         main_entries = [
-            {
-                "type": "user",
-                "uuid": "u1",
-                "message": {"role": "user", "content": "hi"},
-            },
-            {"type": "assistant", "uuid": "a1", "message": {"role": "assistant"}},
+            entry(
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "message": {"role": "user", "content": "hi"},
+                }
+            ),
+            entry(
+                {"type": "assistant", "uuid": "a1", "message": {"role": "assistant"}}
+            ),
         ]
-        sub_entries = [{"type": "user", "uuid": "su1", "isSidechain": True}]
+        sub_entries = [entry({"type": "user", "uuid": "su1", "isSidechain": True})]
 
         batcher.enqueue(main_path, main_entries)
         batcher.enqueue(sub_path, sub_entries)
@@ -350,7 +362,7 @@ class TestRoundTrip:
         assert info.custom_title == "Imported"
         assert info.first_prompt == "hello mongo"
 
-        key = {"project_key": project_dir.name, "session_id": SESSION_ID}
+        key: SessionKey = {"project_key": project_dir.name, "session_id": SESSION_ID}
         assert await store.load({**key, "subpath": "subagents/agent-1"}) == sub_entries
 
         await delete_session_via_store(store, SESSION_ID, directory=str(cwd))

@@ -11,7 +11,7 @@ from claude_agent_sdk import SessionKey
 
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
-from .conftest import StoreFactory
+from .conftest import StoreFactory, entry
 
 DAY_MS = 86_400_000
 
@@ -37,15 +37,17 @@ class TestDeleteInactive:
         sub = "subagents/agent-1"
 
         # Idle: every entry, main and subagent, is 40 days old.
-        await store.append(_key("idle"), [{"type": "user", "customTitle": "idle"}])
+        await store.append(
+            _key("idle"), [entry({"type": "user", "customTitle": "idle"})]
+        )
         await store.append(_key("idle", subpath=sub), [{"type": "user"}])
         await _age(store, 40, session_id="idle")
 
         # Active: 40 days of history plus one entry today. Must survive intact,
         # not lose its old entries.
-        await store.append(_key("active"), [{"type": "user", "n": 1}])
+        await store.append(_key("active"), [entry({"type": "user", "n": 1})])
         await _age(store, 40, session_id="active")
-        await store.append(_key("active"), [{"type": "user", "n": 2}])
+        await store.append(_key("active"), [entry({"type": "user", "n": 2})])
 
         # Main transcript idle, but a subagent wrote today: still active.
         await store.append(_key("sub_active"), [{"type": "user"}])

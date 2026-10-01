@@ -11,12 +11,22 @@ import itertools
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from claude_agent_sdk import SessionStoreEntry
 from pymongo import AsyncMongoClient
 
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
+
+
+def entry(fields: dict[str, Any]) -> SessionStoreEntry:
+    """Type ``fields`` as a transcript entry.
+
+    Real entries carry fields ``SessionStoreEntry`` doesn't declare, which it
+    allows at runtime but a ``TypedDict`` can't express.
+    """
+    return cast(SessionStoreEntry, fields)
 
 
 @pytest.fixture

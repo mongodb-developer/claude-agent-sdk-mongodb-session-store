@@ -13,19 +13,19 @@ from typing import Any
 import anyio
 import bson.objectid
 import pytest
-from claude_agent_sdk import SessionKey
+from claude_agent_sdk import SessionKey, SessionStoreEntry, fold_session_summary
 from pymongo.errors import DuplicateKeyError
 
 import claude_agent_sdk_mongodb_session_store._store as _store
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
-from .conftest import StoreFactory
+from .conftest import StoreFactory, entry
 
 KEY: SessionKey = {"project_key": "proj", "session_id": "sess"}
 
 
-def _e(uuid: str, **extra: Any) -> dict[str, Any]:
-    return {"type": "user", "uuid": uuid, **extra}
+def _e(uuid: str, **extra: Any) -> SessionStoreEntry:
+    return entry({"type": "user", "uuid": uuid, **extra})
 
 
 def _pause_after_summary_read(
@@ -169,7 +169,7 @@ class TestIdempotency:
         await store.append(KEY, [_e("a", n=1)])
         batch = [_e("b", n=2, customTitle="t"), _e("c", n=3)]
 
-        real_fold = _store.fold_session_summary
+        real_fold = fold_session_summary
         calls = 0
 
         def fail_once(*args: Any) -> Any:
@@ -195,7 +195,7 @@ class TestIdempotency:
         """Per the protocol, entries without a ``uuid`` (titles, tags, mode
         markers) are appended every time."""
         store = await make_store()
-        tag = {"type": "tag", "tag": "x"}
+        tag = entry({"type": "tag", "tag": "x"})
         await store.append(KEY, [tag])
         await store.append(KEY, [tag])
         assert await store.load(KEY) == [tag, tag]

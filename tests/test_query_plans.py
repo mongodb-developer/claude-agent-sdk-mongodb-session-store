@@ -17,7 +17,7 @@ from claude_agent_sdk import SessionKey
 
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
-from .conftest import StoreFactory
+from .conftest import StoreFactory, entry
 
 
 @asynccontextmanager
@@ -55,7 +55,7 @@ class TestListSessionsPlan:
         for s in range(n_sessions):
             key: SessionKey = {"project_key": "proj", "session_id": f"s{s}"}
             await store.append(
-                key, [{"type": "user", "n": i} for i in range(n_entries)]
+                key, [entry({"type": "user", "n": i}) for i in range(n_entries)]
             )
             # Subagent entries must neither be listed nor examined.
             await store.append(
@@ -87,11 +87,11 @@ class TestSummariesPlan:
         or each append pays for an index key delete + insert."""
         store = await make_store()
         key: SessionKey = {"project_key": "proj", "session_id": "s"}
-        await store.append(key, [{"type": "user", "customTitle": "t"}])
+        await store.append(key, [entry({"type": "user", "customTitle": "t"})])
 
         async with _profiling(store):
             for i in range(5):
-                await store.append(key, [{"type": "user", "n": i}])
+                await store.append(key, [entry({"type": "user", "n": i})])
 
         writes = await _profiled(store, store._summaries, op="update")
         assert len(writes) == 5
@@ -151,7 +151,7 @@ class TestDeleteInactivePlan:
         for s in range(n_sessions):
             key: SessionKey = {"project_key": "proj", "session_id": f"s{s}"}
             await store.append(
-                key, [{"type": "user", "n": i} for i in range(n_entries)]
+                key, [entry({"type": "user", "n": i}) for i in range(n_entries)]
             )
             await store.append({**key, "subpath": "subagents/a"}, [{"type": "user"}])
         await store._counters.update_many(
