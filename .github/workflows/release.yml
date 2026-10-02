@@ -55,8 +55,6 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      MONGODB_URI: mongodb://localhost:27017
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -72,9 +70,10 @@ jobs:
           enable-cache: false
 
       - name: Start MongoDB
-        uses: supercharge/mongodb-github-action@315db7fe45ac2880b7758f1933e6e5d59afd5e94 # 1.12.1
+        id: mongodb
+        uses: mongodb-labs/drivers-evergreen-tools@ec0b1497b3d351acbfc4fd7579bf3de4de0a1046 # v1.1.0
         with:
-          mongodb-version: "9.0"
+          version: "9.0"
 
       - name: Download distributions
         uses: actions/download-artifact@v8.0.1
@@ -92,6 +91,8 @@ jobs:
           "$RUNNER_TEMP/wheel-env/bin/python" -I -c "import claude_agent_sdk_mongodb_session_store"
 
       - name: Run the tests against the wheel
+        env:
+          MONGODB_URI: ${{ steps.mongodb.outputs.cluster-uri }}
         run: |
           uv sync --locked --no-install-project
           uv pip install --python .venv dist/*.whl
