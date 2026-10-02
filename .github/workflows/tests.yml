@@ -52,15 +52,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Minimum — Python 3.10, Claude Agent SDK 0.1.66, PyMongo 4.13, MongoDB 7.0
+          - name: Minimum — Python 3.10, lowest declared dependencies, MongoDB 7.0
+            deps: minimum
             python_version: "3.10"
-            sdk_spec: claude-agent-sdk==0.1.66
-            pymongo_spec: pymongo==4.13.0
             mongodb_version: "7.0"
           - name: Current — Python 3.14, latest Claude Agent SDK and PyMongo, MongoDB 9.0
+            deps: current
             python_version: "3.14"
-            sdk_spec: claude-agent-sdk
-            pymongo_spec: pymongo
             mongodb_version: "9.0"
     env:
       MONGODB_URI: mongodb://localhost:27017
@@ -81,13 +79,17 @@ jobs:
         with:
           mongodb-version: ${{ matrix.mongodb_version }}
 
-      - name: Install test stack
-        env:
-          SDK_SPEC: ${{ matrix.sdk_spec }}
-          PYMONGO_SPEC: ${{ matrix.pymongo_spec }}
+      # Re-resolves (and rewrites uv.lock on the runner) to the lowest version
+      # each direct dependency allows. Later steps use --no-sync to keep it.
+      - name: Install the lowest declared dependencies
+        if: matrix.deps == 'minimum'
+        run: uv sync --resolution lowest-direct
+
+      - name: Install the latest Claude Agent SDK and PyMongo
+        if: matrix.deps == 'current'
         run: |
           uv sync --locked
-          uv pip install --python .venv --upgrade "$SDK_SPEC" "$PYMONGO_SPEC"
+          uv pip install --python .venv --upgrade claude-agent-sdk pymongo
 
       - name: Show installed versions
         run: >-
@@ -97,11 +99,11 @@ jobs:
           print('PyMongo', pymongo.__version__)"
 
       - name: Run tests
-        if: matrix.python_version == '3.10'
+        if: matrix.deps == 'minimum'
         run: uv run --no-sync pytest
 
       - name: Run tests with coverage
-        if: matrix.python_version == '3.14'
+        if: matrix.deps == 'current'
         run: >-
           uv run --no-sync pytest
           --cov=claude_agent_sdk_mongodb_session_store
@@ -109,7 +111,7 @@ jobs:
           --cov-report=html
 
       - name: Upload HTML coverage report
-        if: always() && matrix.python_version == '3.14'
+        if: always() && matrix.deps == 'current'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: html-coverage-report
