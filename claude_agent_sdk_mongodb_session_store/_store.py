@@ -4,7 +4,7 @@ Originally contributed as a reference adapter in
 anthropics/claude-agent-sdk-python#1014, itself a port of the
 ``MongoDBSessionStore`` reference implementation in the TypeScript SDK.
 
-Requires ``pymongo>=4.13`` (the stable async API). Install with::
+Requires ``pymongo>=4.14`` (the stable async API and ``append_metadata``). Install with::
 
     uv add claude-agent-sdk-mongodb-session-store
 

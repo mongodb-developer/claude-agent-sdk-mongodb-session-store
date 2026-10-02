@@ -265,7 +265,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.1.66" },
-    { name = "pymongo", specifier = ">=4.13" },
+    { name = "pymongo", specifier = ">=4.14" },
 ]
 
 [package.metadata.requires-dev]
