@@ -105,6 +105,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
 from bson import ObjectId
@@ -118,6 +119,7 @@ from claude_agent_sdk import (
     fold_session_summary,
 )
 from pymongo import ReturnDocument
+from pymongo.driver_info import DriverInfo
 from pymongo.errors import BulkWriteError, DuplicateKeyError, InvalidName
 
 if TYPE_CHECKING:
@@ -228,7 +230,12 @@ class MongoDBSessionStore(SessionStore):
             counters_collection = options.counters_collection
         if client is None:
             raise ValueError("MongoDBSessionStore requires 'client'")
-
+        client.append_metadata(
+            DriverInfo(
+                name="claude-agent-sdk-mongodb-session-store",
+                version=version("claude-agent-sdk-mongodb-session-store"),
+            )
+        )
         self._db: AsyncDatabase[dict[str, Any]] = (
             client[db_name] if db_name is not None else client.get_default_database()
         )
