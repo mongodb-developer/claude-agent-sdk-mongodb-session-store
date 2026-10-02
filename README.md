@@ -36,6 +36,11 @@ The constructor also takes `entries_collection`, `summaries_collection` and
 `options=MongoDBSessionStoreOptions(...)`. A collection name MongoDB rejects,
 or one in the reserved `system.` namespace, raises `ValueError`.
 
+Every method checks its key before touching the database: `project_key`,
+`session_id` and `subpath` must be strings (`TypeError` otherwise), and
+`project_key` and `session_id` must be non-empty (`ValueError`). See
+[Security](#security) for why.
+
 ## Schema
 
 A *transcript* is the record of one conversation that Claude Code writes as
@@ -215,6 +220,47 @@ MONGODB_URI=mongodb://localhost:27017 uv run pytest -v
 Each test uses a random database name and drops it on teardown. The query-plan
 tests turn on the database profiler for their own database only.
 
+## Security
+
+**Transcripts are sensitive.** Every entry is stored verbatim: user prompts,
+assistant replies, tool inputs and tool results. Tool results routinely
+include file contents, command output and environment variables, so a
+transcript can contain anything the agent saw, including credentials. The
+summary sidecar's `data` blob holds a digest of the same material. Treat the
+three collections as you would any store of user conversations:
+
+- Connect over TLS and authenticate. Both are configured on the
+  `AsyncMongoClient` URI the caller passes in; the store never reads
+  credentials itself. On Atlas, both are on by default.
+- Give the application a dedicated database user with the `readWrite` role
+  on this one database and nothing else. `create_schema()` needs
+  `createIndex`, which `readWrite` includes.
+- Turn on encryption at rest. If plaintext transcripts must never reach the
+  server, encrypt the `entry` and `data` fields client-side with
+  [Queryable Encryption or CSFLE](https://www.mongodb.com/docs/manual/core/security-in-use-encryption/).
+  The store never queries inside those fields, so encrypting them costs no
+  index.
+
+**Keys are validated before every query.** `project_key`, `session_id` and
+`subpath` are passed into MongoDB query filters. A value that is not a
+string, such as the dict `{"$ne": ""}`, would otherwise act as a query
+operator there and match other sessions, or other tenants when `project_key`
+is a tenant id. The store raises `TypeError` for a non-string and
+`ValueError` for an empty `project_key` or `session_id` before any I/O. The
+SDK already validates `session_id` as a UUID on its own code paths; this
+check protects callers that drive the store directly, for example from a web
+handler.
+
+**`delete_inactive()` spans every tenant.** It sweeps all `project_key`s in
+the database. Run it from a privileged maintenance job, not from code that
+acts on behalf of one tenant.
+
+**Reads are unbounded.** `load()` returns a whole transcript, and
+`append()` rebuilds the summary from the whole main transcript whenever it
+loses the compare-and-swap or sees a duplicate, up to 16 times per call.
+Very large sessions under heavy write contention can make a single append
+expensive. Use `delete_inactive()` to keep the data set bounded.
+
 ## Production checklist
 
 - Size the `AsyncMongoClient` connection pool for expected concurrent
@@ -222,6 +268,8 @@ tests turn on the database profiler for their own database only.
   connections.
 - Schedule `delete_inactive()` for retention — every collection grows
   unbounded otherwise.
+- Work through the [Security](#security) section: TLS and auth on the URI, a
+  least-privilege database user, and encryption at rest.
 
 ## Credits
 

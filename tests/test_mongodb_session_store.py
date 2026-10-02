@@ -369,3 +369,57 @@ class TestRoundTrip:
         assert await list_sessions_from_store(store, directory=str(cwd)) == []
         assert await store.load(key) is None
         assert await store.load({**key, "subpath": "subagents/agent-1"}) is None
+
+
+class TestKeyInjection:
+    """A non-string key field must never reach the query filter.
+
+    Before validation was added, ``{"$ne": ""}`` as a ``session_id`` acted as
+    a query operator: ``load()`` returned every session in the project and
+    ``delete()`` removed them all. Seed two sessions in two tenants, attempt
+    each operator read and delete, and check nothing leaked or was deleted.
+    """
+
+    @pytest.mark.anyio
+    async def test_operator_keys_raise_and_leave_data_intact(
+        self, store: SessionStore
+    ) -> None:
+        seeded: dict[tuple[str, str], list[Any]] = {}
+        for pk, sid in [("tenant-a", "s1"), ("tenant-a", "s2"), ("tenant-b", "s3")]:
+            entries = [entry({"type": "user", "uuid": f"{sid}-u1", "text": sid})]
+            await store.append({"project_key": pk, "session_id": sid}, entries)
+            seeded[(pk, sid)] = entries
+
+        operators: list[dict[str, Any]] = [
+            {"project_key": "tenant-a", "session_id": {"$ne": ""}},
+            {"project_key": {"$regex": ".*"}, "session_id": "s3"},
+        ]
+        for bad in operators:
+            with pytest.raises(TypeError):
+                await store.load(bad)  # type: ignore[arg-type]
+            with pytest.raises(TypeError):
+                await store.delete(bad)  # type: ignore[arg-type]
+            with pytest.raises(TypeError):
+                await store.list_subkeys(bad)  # type: ignore[arg-type]
+        bad_subpath: dict[str, Any] = {
+            "project_key": "tenant-a",
+            "session_id": "s1",
+            "subpath": {"$ne": ""},
+        }
+        with pytest.raises(TypeError):
+            await store.load(bad_subpath)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            await store.delete(bad_subpath)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            await store.list_sessions({"$ne": ""})  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            await store.list_session_summaries({"$ne": ""})  # type: ignore[arg-type]
+
+        for (pk, sid), entries in seeded.items():
+            assert await store.load({"project_key": pk, "session_id": sid}) == entries
+        assert sorted(
+            s["session_id"] for s in await store.list_sessions("tenant-a")
+        ) == [
+            "s1",
+            "s2",
+        ]

@@ -114,3 +114,82 @@ class TestDeleteInactiveValidation:
         store = MongoDBSessionStore(client=offline_client, db_name="db")
         with pytest.raises(ValueError, match="older_than"):
             await store.delete_inactive(older_than)
+
+
+class TestKeyValidation:
+    """Key fields go into query filters verbatim, so a non-string (e.g. a
+    dict such as ``{"$ne": ""}``) would act as a query operator and read or
+    delete across sessions and tenants. Every method must reject it before
+    any I/O: the offline client would fail to connect otherwise."""
+
+    BAD_VALUES: list[Any] = [{"$ne": ""}, {"$regex": ".*"}, ["a"], 1, None]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("bad", BAD_VALUES)
+    @pytest.mark.parametrize("field", ["project_key", "session_id"])
+    @pytest.mark.parametrize("method", ["append", "load", "delete", "list_subkeys"])
+    async def test_key_methods_reject_non_string(
+        self, offline_client: Client, method: str, field: str, bad: Any
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        key: dict[str, Any] = {"project_key": "p", "session_id": "s", field: bad}
+        args: tuple[Any, ...] = (
+            (key, [{"type": "user"}]) if method == "append" else (key,)
+        )
+        with pytest.raises(TypeError, match=field):
+            await getattr(store, method)(*args)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("bad", [{"$ne": ""}, ["a"], 1])
+    @pytest.mark.parametrize("method", ["append", "load", "delete"])
+    async def test_key_methods_reject_non_string_subpath(
+        self, offline_client: Client, method: str, bad: Any
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        key: dict[str, Any] = {"project_key": "p", "session_id": "s", "subpath": bad}
+        args: tuple[Any, ...] = (
+            (key, [{"type": "user"}]) if method == "append" else (key,)
+        )
+        with pytest.raises(TypeError, match="subpath"):
+            await getattr(store, method)(*args)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("field", ["project_key", "session_id"])
+    @pytest.mark.parametrize("method", ["append", "load", "delete", "list_subkeys"])
+    async def test_key_methods_reject_empty_string(
+        self, offline_client: Client, method: str, field: str
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        key: dict[str, Any] = {"project_key": "p", "session_id": "s", field: ""}
+        args: tuple[Any, ...] = (
+            (key, [{"type": "user"}]) if method == "append" else (key,)
+        )
+        with pytest.raises(ValueError, match=field):
+            await getattr(store, method)(*args)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("bad", BAD_VALUES)
+    @pytest.mark.parametrize("method", ["list_sessions", "list_session_summaries"])
+    async def test_project_methods_reject_non_string(
+        self, offline_client: Client, method: str, bad: Any
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        with pytest.raises(TypeError, match="project_key"):
+            await getattr(store, method)(bad)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("method", ["list_sessions", "list_session_summaries"])
+    async def test_project_methods_reject_empty_string(
+        self, offline_client: Client, method: str
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        with pytest.raises(ValueError, match="project_key"):
+            await getattr(store, method)("")
+
+    @pytest.mark.anyio
+    async def test_append_with_empty_batch_still_validates(
+        self, offline_client: Client
+    ) -> None:
+        store = MongoDBSessionStore(client=offline_client, db_name="db")
+        with pytest.raises(TypeError, match="session_id"):
+            await store.append({"project_key": "p", "session_id": {"$ne": ""}}, [])  # type: ignore[typeddict-item]

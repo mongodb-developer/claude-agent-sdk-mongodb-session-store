@@ -102,6 +102,7 @@ the CLI's ``cleanupPeriodDays`` setting.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -132,6 +133,36 @@ _MAIN: str = ""
 #: How many times ``append()`` re-reads and retries the summary write when
 #: another writer changed the summary in between.
 _SUMMARY_WRITE_ATTEMPTS = 16
+
+
+def _require_str(label: str, value: object) -> str:
+    """Return ``value`` if it is a non-empty ``str``, else raise.
+
+    Key fields go into query filters verbatim. A non-string, such as the
+    dict ``{"$ne": ""}``, would act as a query operator there and match
+    other sessions or tenants, so it is a ``TypeError``. An empty string is
+    never a valid key and is a ``ValueError``.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a str, got {type(value).__name__}")
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    return value
+
+
+def _key_parts(key: Mapping[str, object]) -> tuple[str, str, str]:
+    """Validate ``key`` and return ``(project_key, session_id, subpath)``.
+
+    ``subpath`` is :data:`_MAIN` when the key omits it (the main transcript).
+    """
+    project_key = _require_str("project_key", key.get("project_key"))
+    session_id = _require_str("session_id", key.get("session_id"))
+    subpath = key.get("subpath")
+    if subpath is None:
+        return project_key, session_id, _MAIN
+    if not isinstance(subpath, str):
+        raise TypeError(f"subpath must be a str, got {type(subpath).__name__}")
+    return project_key, session_id, subpath
 
 
 @dataclass
@@ -420,15 +451,15 @@ class MongoDBSessionStore(SessionStore):
     # ------------------------------------------------------------------
 
     async def append(self, key: SessionKey, entries: list[SessionStoreEntry]) -> None:
+        project_key, session_id, subpath = _key_parts(key)
         if not entries:
             return
-        subpath = key.get("subpath") or _MAIN
         now = int(time.time() * 1000)
         first_position = await self._reserve_positions(key, subpath, len(entries), now)
         docs: list[dict[str, Any]] = [
             {
-                "project_key": key["project_key"],
-                "session_id": key["session_id"],
+                "project_key": project_key,
+                "session_id": session_id,
                 "subpath": subpath,
                 "position": first_position + i,
                 "entry": dict(entry),
@@ -446,12 +477,9 @@ class MongoDBSessionStore(SessionStore):
             await self._update_summary(key, entries, first_position, now, all_new)
 
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
+        project_key, session_id, subpath = _key_parts(key)
         cursor = self._entries.find(
-            {
-                "project_key": key["project_key"],
-                "session_id": key["session_id"],
-                "subpath": key.get("subpath") or _MAIN,
-            }
+            {"project_key": project_key, "session_id": session_id, "subpath": subpath}
         ).sort("position", 1)
         docs = await cursor.to_list(length=None)
         if not docs:
@@ -459,6 +487,7 @@ class MongoDBSessionStore(SessionStore):
         return [d["entry"] for d in docs]
 
     async def list_sessions(self, project_key: str) -> list[SessionStoreListEntry]:
+        _require_str("project_key", project_key)
         # Sorting on the sessions_idx key order lets $group/$first read only
         # each session's newest index key (DISTINCT_SCAN), never a document.
         pipeline: list[dict[str, Any]] = [
@@ -474,6 +503,7 @@ class MongoDBSessionStore(SessionStore):
     async def list_session_summaries(
         self, project_key: str
     ) -> list[SessionSummaryEntry]:
+        _require_str("project_key", project_key)
         return [
             {
                 "session_id": d["_id"]["session_id"],
@@ -494,18 +524,18 @@ class MongoDBSessionStore(SessionStore):
         still sort after them. :meth:`delete_inactive` removes counters once
         they are idle.
         """
-        subpath = key.get("subpath")
-        if subpath:
+        project_key, session_id, subpath = _key_parts(key)
+        if subpath != _MAIN:
             # The summary sidecar represents the main transcript; leave it.
             await self._entries.delete_many(
                 {
-                    "project_key": key["project_key"],
-                    "session_id": key["session_id"],
+                    "project_key": project_key,
+                    "session_id": session_id,
                     "subpath": subpath,
                 }
             )
             return
-        await self._delete_session(key["project_key"], key["session_id"])
+        await self._delete_session(project_key, session_id)
 
     async def _delete_session(self, project_key: str, session_id: str) -> int:
         """Delete every entry, main and subagent, then the summary. Returns
@@ -519,11 +549,12 @@ class MongoDBSessionStore(SessionStore):
         return result.deleted_count
 
     async def list_subkeys(self, key: SessionListSubkeysKey) -> list[str]:
+        project_key, session_id, _ = _key_parts(key)
         result = await self._entries.distinct(
             "subpath",
             {
-                "project_key": key["project_key"],
-                "session_id": key["session_id"],
+                "project_key": project_key,
+                "session_id": session_id,
                 "subpath": {"$ne": _MAIN},
             },
         )
