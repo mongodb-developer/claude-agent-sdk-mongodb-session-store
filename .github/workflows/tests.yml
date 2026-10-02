@@ -60,8 +60,6 @@ jobs:
             deps: current
             python_version: "3.14"
             mongodb_version: "9.0"
-    env:
-      MONGODB_URI: mongodb://localhost:27017
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -75,9 +73,10 @@ jobs:
           enable-cache: true
 
       - name: Start MongoDB ${{ matrix.mongodb_version }}
-        uses: supercharge/mongodb-github-action@315db7fe45ac2880b7758f1933e6e5d59afd5e94 # 1.12.1
+        id: mongodb
+        uses: mongodb-labs/drivers-evergreen-tools@ec0b1497b3d351acbfc4fd7579bf3de4de0a1046 # v1.1.0
         with:
-          mongodb-version: ${{ matrix.mongodb_version }}
+          version: ${{ matrix.mongodb_version }}
 
       # Re-resolves (and rewrites uv.lock on the runner) to the lowest version
       # each direct dependency allows. Later steps use --no-sync to keep it.
@@ -100,10 +99,14 @@ jobs:
 
       - name: Run tests
         if: matrix.deps == 'minimum'
+        env:
+          MONGODB_URI: ${{ steps.mongodb.outputs.cluster-uri }}
         run: uv run --no-sync pytest
 
       - name: Run tests with coverage
         if: matrix.deps == 'current'
+        env:
+          MONGODB_URI: ${{ steps.mongodb.outputs.cluster-uri }}
         run: >-
           uv run --no-sync pytest
           --cov=claude_agent_sdk_mongodb_session_store
@@ -119,16 +122,71 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # Skipped on pull requests to keep them fast; runs on main, before a
+  # release, and on manual runs.
+  cross-platform:
+    name: ${{ matrix.name }}
+    needs: lint
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Current — Python 3.14, latest Claude Agent SDK and PyMongo, MongoDB 9.0, macOS
+            os: macos-latest
+          - name: Current — Python 3.14, latest Claude Agent SDK and PyMongo, MongoDB 9.0, Windows
+            os: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python 3.14
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Start MongoDB 9.0
+        id: mongodb
+        uses: mongodb-labs/drivers-evergreen-tools@ec0b1497b3d351acbfc4fd7579bf3de4de0a1046 # v1.1.0
+        with:
+          version: "9.0"
+
+      - name: Install the latest Claude Agent SDK and PyMongo
+        run: |
+          uv sync --locked
+          uv pip install --python .venv --upgrade claude-agent-sdk pymongo
+
+      - name: Show installed versions
+        run: >-
+          uv run --no-sync python -c "import platform, claude_agent_sdk, pymongo;
+          print('Python', platform.python_version());
+          print('Claude Agent SDK', claude_agent_sdk.__version__);
+          print('PyMongo', pymongo.__version__)"
+
+      - name: Run tests
+        env:
+          MONGODB_URI: ${{ steps.mongodb.outputs.cluster-uri }}
+        run: uv run --no-sync pytest
+
   ci-success:
     name: CI Success
-    needs: [lint, tests]
+    needs: [lint, tests, cross-platform]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail unless every job passed
+      # A skipped job counts as passing: cross-platform skips on pull requests,
+      # and a job skipped because Lint failed still fails here through Lint.
+      - name: Fail if any job failed or was cancelled
         if: >-
           contains(needs.*.result, 'failure') ||
-          contains(needs.*.result, 'cancelled') ||
-          contains(needs.*.result, 'skipped')
+          contains(needs.*.result, 'cancelled')
         run: exit 1
