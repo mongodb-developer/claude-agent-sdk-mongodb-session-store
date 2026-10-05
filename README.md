@@ -236,10 +236,11 @@ three collections as you would any store of user conversations:
   on this one database and nothing else. `create_schema()` needs
   `createIndex`, which `readWrite` includes.
 - Turn on encryption at rest. If plaintext transcripts must never reach the
-  server, encrypt the `entry` and `data` fields client-side with
-  [Queryable Encryption or CSFLE](https://www.mongodb.com/docs/manual/core/security-in-use-encryption/).
-  The store never queries inside those fields, so encrypting them costs no
-  index.
+  server, configure the `AsyncMongoClient` for automatic
+  [Client-Side Field Level Encryption (CSFLE) with randomized encryption](https://www.mongodb.com/docs/manual/core/csfle/fundamentals/encryption-algorithms/)
+  of the entire `entry` and `data` objects. The store never queries inside
+  these payloads, so they do not need to be queryable. Keep identifiers and
+  indexed metadata fields unencrypted.
 
 **Keys are validated before every query.** `project_key`, `session_id` and
 `subpath` are passed into MongoDB query filters. A value that is not a
