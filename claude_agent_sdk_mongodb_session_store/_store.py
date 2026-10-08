@@ -4,7 +4,8 @@ Originally contributed as a reference adapter in
 anthropics/claude-agent-sdk-python#1014, itself a port of the
 ``MongoDBSessionStore`` reference implementation in the TypeScript SDK.
 
-Requires ``pymongo>=4.13`` (the stable async API). Install with::
+Requires ``pymongo>=4.14`` (the stable async API and
+``AsyncMongoClient.append_metadata``). Install with::
 
     uv add claude-agent-sdk-mongodb-session-store
 
@@ -118,7 +119,10 @@ from claude_agent_sdk import (
     fold_session_summary,
 )
 from pymongo import ReturnDocument
+from pymongo.driver_info import DriverInfo
 from pymongo.errors import BulkWriteError, DuplicateKeyError, InvalidName
+
+from ._version import __version__
 
 if TYPE_CHECKING:
     from pymongo import AsyncMongoClient
@@ -129,6 +133,10 @@ if TYPE_CHECKING:
 #: never emits an empty subpath; treating ``key.get("subpath") or ""`` as the
 #: sentinel keeps the Mongo query and Postgres adapter aligned.
 _MAIN: str = ""
+
+#: Appended to the client's handshake metadata (``hello`` ``client.driver``) so
+#: the server and Atlas can attribute connections to this library.
+_DRIVER_INFO = DriverInfo(name="claude-sdk-sessionstore", version=__version__)
 
 #: How many times ``append()`` re-reads and retries the summary write when
 #: another writer changed the summary in between.
@@ -235,6 +243,10 @@ class MongoDBSessionStore(SessionStore):
         self._entries = self._collection("entries_collection", entries_collection)
         self._summaries = self._collection("summaries_collection", summaries_collection)
         self._counters = self._collection("counters_collection", counters_collection)
+
+        # Last, so a constructor that raises leaves the client untouched.
+        # Idempotent per name: stores sharing a client add it only once.
+        client.append_metadata(_DRIVER_INFO)
 
     def _collection(self, label: str, name: str) -> AsyncCollection[dict[str, Any]]:
         """Return collection ``name``, raising ``ValueError`` if it is invalid.
