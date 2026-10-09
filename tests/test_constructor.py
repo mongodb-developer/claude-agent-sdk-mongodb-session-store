@@ -69,6 +69,14 @@ class TestConstructor:
         assert store._summaries.name == "sums"
         assert store._counters.name == "ctrs"
 
+    @pytest.mark.anyio
+    async def test_appends_client_metadata(self, offline_client: Client) -> None:
+        MongoDBSessionStore(client=offline_client, db_name="db")
+        MongoDBSessionStore(client=offline_client, db_name="db")  # idempotent
+        driver = offline_client.options.pool_options.metadata["driver"]
+        assert driver["name"].split("|")[-1] == "claude-sdk-sessionstore"
+        assert driver["name"].count("claude-sdk-sessionstore") == 1
+
 
 class TestCollectionNames:
     @pytest.mark.anyio
