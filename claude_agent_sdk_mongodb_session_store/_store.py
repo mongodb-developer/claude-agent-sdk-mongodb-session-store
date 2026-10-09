@@ -244,9 +244,11 @@ class MongoDBSessionStore(SessionStore):
         self._summaries = self._collection("summaries_collection", summaries_collection)
         self._counters = self._collection("counters_collection", counters_collection)
 
-        # Last, so a constructor that raises leaves the client untouched.
-        # Idempotent per name: stores sharing a client add it only once.
-        client.append_metadata(_DRIVER_INFO)
+        # Last, so a constructor that raises leaves the client untouched. Check
+        # first: pymongo 4.14 appends the name again on every call.
+        names = client.options.pool_options.metadata["driver"]["name"].split("|")
+        if _DRIVER_INFO.name not in names:
+            client.append_metadata(_DRIVER_INFO)
 
     def _collection(self, label: str, name: str) -> AsyncCollection[dict[str, Any]]:
         """Return collection ``name``, raising ``ValueError`` if it is invalid.
