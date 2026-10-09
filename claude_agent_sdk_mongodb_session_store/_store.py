@@ -232,7 +232,7 @@ class MongoDBSessionStore(SessionStore):
             raise ValueError("MongoDBSessionStore requires 'client'")
         client.append_metadata(
             DriverInfo(
-                name="claude-agent-sdk-mongodb-session-store",
+                name="claude-sdk-sessionstore",
                 version=version("claude-agent-sdk-mongodb-session-store"),
             )
         )
