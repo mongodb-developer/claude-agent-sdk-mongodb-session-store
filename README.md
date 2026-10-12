@@ -1,8 +1,7 @@
 # claude-agent-sdk-mongodb-session-store
 
 MongoDB `SessionStore` for the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) backed by the official [`pymongo`](https://www.mongodb.com/docs/drivers/pymongo/)
-driver via its stable async API (`pymongo.AsyncMongoClient`, introduced in
-pymongo 4.13).
+driver via its stable async API `pymongo.AsyncMongoClient`.
 
 ## Installation
 
@@ -19,7 +18,13 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
 uri = "mongodb://localhost:27017"  # local development. Use TLS and auth in production
-client = AsyncMongoClient(uri)
+client = AsyncMongoClient(
+    uri,
+    readPreference="primary",
+    w="majority",
+    serverSelectionTimeoutMS=10_000,
+    timeoutMS=20_000,
+)
 store = MongoDBSessionStore(client=client, db_name="claude")
 await store.create_schema()  # idempotent createIndexes
 
@@ -41,6 +46,158 @@ Every method checks its key before touching the database: `project_key`,
 `session_id` and `subpath` must be strings (`TypeError` otherwise), and
 `project_key` and `session_id` must be non-empty (`ValueError`). See
 [Security](#security) for why.
+
+## Client configuration
+
+The store sets no timeouts, read preference or write concern of its own; it
+uses whatever the `AsyncMongoClient` you pass in is configured with. Its
+availability is that of your MongoDB deployment. We recommend
+`readPreference=primary`, `w=majority`, `serverSelectionTimeoutMS` of about
+10 s and `timeoutMS` of about 20 s as shown in [Usage](#usage) above.
+
+Use the primary for reads, because `load()` for a resume and the summary
+rebuild in `append()` must see the latest entries. `w="majority"` keeps an
+acknowledged append from being rolled back by a failover. Keep the timeouts
+below the SDK's 60 s limit on each `append()`. The SDK retries a failed
+`append()` up to three times, but not one that hits its own 60 s limit,
+because the call may still land. A driver timeout (`NetworkTimeout`,
+`ExecutionTimeout`) is retried, and the entry `uuid` keeps the retry from
+storing a duplicate. `timeoutMS` applies to each driver operation, and one
+`append()` makes several, so it bounds a call but does not cap it at 20 s.
+
+Writes need the primary, so appends fail during an election. The SDK drops a
+batch it cannot append and the agent run continues, but `load()` fails after
+the SDK's `load_timeout_ms` (60 s by default). Inserts, the counter update
+and the summary write are retryable writes. `delete()` and
+`delete_inactive()` use `delete_many`, which is not, so a failover can stop
+them partway; run them again to finish.
+
+## Retries
+
+The SDK retries a failed `append()` with the same batch. Most entries carry
+a `uuid`, which the adapter treats as an idempotency key: an entry whose
+`uuid` is already stored in the same transcript is skipped, so a retry never
+stores it twice. The same holds when `import_session_to_store()` re-imports
+a session. Entries without a `uuid` (titles, tags, mode markers) are
+stored every time, as the SDK's `SessionStore` protocol asks.
+
+## Concurrency
+
+Per the `SessionStore.list_session_summaries` contract, sidecar updates
+inside `append()` must be serialized when calls can race for the same
+session. The summary write is a compare-and-swap on its `rev` token, which
+changes on every write, so appends from different processes (workers, pods)
+to the same session can't overwrite each other's summary. A writer that
+loses the race reads the summary again and rebuilds it from the stored
+entries. The same check stops an in-flight append from restoring the
+summary of a session that was deleted in the meantime. If the summary keeps
+changing, the write gives up after 16 attempts and `append()` raises
+`RuntimeError`.
+
+The store keeps no per-session state in memory, so one instance can serve
+any number of sessions in a long-running process.
+
+## Retention
+
+This adapter never deletes documents on its own. Run
+`delete_inactive()` on a schedule (cron, an Atlas scheduled trigger, ...) to
+delete every session with no appends for a given period:
+
+```python
+from datetime import timedelta
+
+deleted = await store.delete_inactive(timedelta(days=30))
+```
+
+A session is active if any of its transcripts, main or subagent, was
+appended to within the period. Sessions are deleted whole, in every project.
+The sweep reads only the counters collection, one small document per
+transcript, never the entries.
+
+Don't expire individual entries with a TTL index or a
+`delete_many({"mtime": {"$lt": cutoff}})`. Both delete the oldest entries of
+a session that is still in use, leaving a transcript that can't be resumed.
+A TTL index would also do nothing here: TTL needs a BSON `Date`, and `mtime`
+is an integer.
+
+`delete()` is implemented (cascades to subpath documents and the summary
+sidecar) but is only called when you invoke `delete_session_via_store()`
+from the SDK.
+
+Local-disk transcripts under `CLAUDE_CONFIG_DIR` are swept independently by
+the CLI's `cleanupPeriodDays` setting.
+
+## Resume from MongoDB
+
+```python
+async for message in query(
+    prompt="Continue where we left off",
+    options=ClaudeAgentOptions(
+        session_store=store,
+        resume="previous-session-id",
+    ),
+):
+    ...
+```
+
+## Security
+
+**Transcripts are sensitive.** Every entry is stored verbatim: user prompts,
+assistant replies, tool inputs and tool results. Tool results routinely
+include file contents, command output and environment variables, so a
+transcript can contain anything the agent saw, including credentials. The
+summary sidecar's `data` blob holds a digest of the same material. Treat the
+three collections as you would any store of user conversations:
+
+- Connect over TLS and authenticate. Both are configured on the
+  `AsyncMongoClient` URI the caller passes in; the store never reads
+  credentials itself. On Atlas, both are on by default.
+- Give the application a dedicated database user with the `readWrite` role
+  on this one database and nothing else.
+- Write access to these collections is equivalent to controlling what a
+  resumed session believes.
+- Don't resume sessions from a database that untrusted parties can write to.
+- Turn on encryption at rest. If plaintext transcripts must never reach the
+  server, configure the `AsyncMongoClient` for automatic
+  [Client-Side Field Level Encryption (CSFLE) with randomized encryption](https://www.mongodb.com/docs/manual/core/csfle/fundamentals/encryption-algorithms/)
+  of the entire `entry` and `data` objects. The store never queries inside
+  these payloads, so they do not need to be queryable. Keep identifiers and
+  indexed metadata fields unencrypted.
+- The store doesn't authenticate callers or sign entries. The application
+  must derive project_key and session_id from an authenticated identity
+  and never take them from untrusted input.
+
+**Keys are validated before every query.** `project_key`, `session_id` and
+`subpath` are passed into MongoDB query filters. A value that is not a
+string, such as the dict `{"$ne": ""}`, would otherwise act as a query
+operator there and match other sessions, or other tenants when `project_key`
+is a tenant id. The store raises `TypeError` for a non-string and
+`ValueError` for an empty `project_key` or `session_id` before any I/O. The
+SDK already validates `session_id` as a UUID on its own code paths; this
+check protects callers that drive the store directly, for example from a web
+handler.
+
+**`delete_inactive()` spans every tenant.** It sweeps all `project_key`s in
+the database. Run it from a privileged maintenance job, not from code that
+acts on behalf of one tenant.
+
+**Reads are unbounded.** `load()` returns a whole transcript, and
+`append()` rebuilds the summary from the whole main transcript whenever it
+loses the compare-and-swap or sees a duplicate, up to 16 times per call.
+Very large sessions under heavy write contention can make a single append
+expensive. Use `delete_inactive()` to keep the data set bounded.
+
+## Production checklist
+
+- Size the `AsyncMongoClient` connection pool for expected concurrent
+  sessions; don't share a pool with request-handler code that holds
+  connections.
+- Schedule `delete_inactive()` for retention — every collection grows
+  unbounded otherwise.
+- Work through the [Security](#security) section: TLS and auth on the URI, a
+  least-privilege database user, and encryption at rest.
+- Set the [client configuration](#client-configuration): primary reads,
+  `w="majority"` and timeouts below the SDK's 60 s limit.
 
 ## Schema
 
@@ -137,74 +294,6 @@ retry, a re-sent entry, or appends finishing out of order), the summary is
 rebuilt from the stored transcript instead. The summary's `mtime` never
 moves backwards and matches the newest entry's.
 
-## Retries
-
-The SDK retries a failed `append()` with the same batch. Most entries carry
-a `uuid`, which the adapter treats as an idempotency key: an entry whose
-`uuid` is already stored in the same transcript is skipped, so a retry never
-stores it twice. The same holds when `import_session_to_store()` re-imports
-a session. Entries without a `uuid` (titles, tags, mode markers) are
-stored every time, as the SDK's `SessionStore` protocol asks.
-
-## Concurrency
-
-Per the `SessionStore.list_session_summaries` contract, sidecar updates
-inside `append()` must be serialized when calls can race for the same
-session. The summary write is a compare-and-swap on its `rev` token, which
-changes on every write, so appends from different processes (workers, pods)
-to the same session can't overwrite each other's summary. A writer that
-loses the race reads the summary again and rebuilds it from the stored
-entries. The same check stops an in-flight append from restoring the
-summary of a session that was deleted in the meantime. If the summary keeps
-changing, the write gives up after 16 attempts and `append()` raises
-`RuntimeError`.
-
-The store keeps no per-session state in memory, so one instance can serve
-any number of sessions in a long-running process.
-
-## Retention
-
-This adapter never deletes documents on its own. Run
-`delete_inactive()` on a schedule (cron, an Atlas scheduled trigger, ...) to
-delete every session with no appends for a given period:
-
-```python
-from datetime import timedelta
-
-deleted = await store.delete_inactive(timedelta(days=30))
-```
-
-A session is active if any of its transcripts, main or subagent, was
-appended to within the period. Sessions are deleted whole, in every project.
-The sweep reads only the counters collection, one small document per
-transcript, never the entries.
-
-Don't expire individual entries with a TTL index or a
-`delete_many({"mtime": {"$lt": cutoff}})`. Both delete the oldest entries of
-a session that is still in use, leaving a transcript that can't be resumed.
-A TTL index would also do nothing here: TTL needs a BSON `Date`, and `mtime`
-is an integer.
-
-`delete()` is implemented (cascades to subpath documents and the summary
-sidecar) but is only called when you invoke `delete_session_via_store()`
-from the SDK.
-
-Local-disk transcripts under `CLAUDE_CONFIG_DIR` are swept independently by
-the CLI's `cleanupPeriodDays` setting.
-
-## Resume from MongoDB
-
-```python
-async for message in query(
-    prompt="Continue where we left off",
-    options=ClaudeAgentOptions(
-        session_store=store,
-        resume="previous-session-id",
-    ),
-):
-    ...
-```
-
 ## Live MongoDB end-to-end
 
 There is no in-process MongoDB mock that faithfully exercises aggregation,
@@ -221,62 +310,6 @@ MONGODB_URI=mongodb://localhost:27017 uv run pytest -v
 Each test uses a random database name and drops it on teardown. The query-plan
 tests turn on the database profiler for their own database only.
 
-## Security
-
-**Transcripts are sensitive.** Every entry is stored verbatim: user prompts,
-assistant replies, tool inputs and tool results. Tool results routinely
-include file contents, command output and environment variables, so a
-transcript can contain anything the agent saw, including credentials. The
-summary sidecar's `data` blob holds a digest of the same material. Treat the
-three collections as you would any store of user conversations:
-
-- Connect over TLS and authenticate. Both are configured on the
-  `AsyncMongoClient` URI the caller passes in; the store never reads
-  credentials itself. On Atlas, both are on by default.
-- Give the application a dedicated database user with the `readWrite` role
-  on this one database and nothing else.
-- Write access to these collections is equivalent to controlling what a
-  resumed session believes.
-- Don't resume sessions from a database that untrusted parties can write to.
-- Turn on encryption at rest. If plaintext transcripts must never reach the
-  server, configure the `AsyncMongoClient` for automatic
-  [Client-Side Field Level Encryption (CSFLE) with randomized encryption](https://www.mongodb.com/docs/manual/core/csfle/fundamentals/encryption-algorithms/)
-  of the entire `entry` and `data` objects. The store never queries inside
-  these payloads, so they do not need to be queryable. Keep identifiers and
-  indexed metadata fields unencrypted.
-- The store doesn't authenticate callers or sign entries. The application
-  must derive project_key and session_id from an authenticated identity
-  and never take them from untrusted input.
-
-**Keys are validated before every query.** `project_key`, `session_id` and
-`subpath` are passed into MongoDB query filters. A value that is not a
-string, such as the dict `{"$ne": ""}`, would otherwise act as a query
-operator there and match other sessions, or other tenants when `project_key`
-is a tenant id. The store raises `TypeError` for a non-string and
-`ValueError` for an empty `project_key` or `session_id` before any I/O. The
-SDK already validates `session_id` as a UUID on its own code paths; this
-check protects callers that drive the store directly, for example from a web
-handler.
-
-**`delete_inactive()` spans every tenant.** It sweeps all `project_key`s in
-the database. Run it from a privileged maintenance job, not from code that
-acts on behalf of one tenant.
-
-**Reads are unbounded.** `load()` returns a whole transcript, and
-`append()` rebuilds the summary from the whole main transcript whenever it
-loses the compare-and-swap or sees a duplicate, up to 16 times per call.
-Very large sessions under heavy write contention can make a single append
-expensive. Use `delete_inactive()` to keep the data set bounded.
-
-## Production checklist
-
-- Size the `AsyncMongoClient` connection pool for expected concurrent
-  sessions; don't share a pool with request-handler code that holds
-  connections.
-- Schedule `delete_inactive()` for retention — every collection grows
-  unbounded otherwise.
-- Work through the [Security](#security) section: TLS and auth on the URI, a
-  least-privilege database user, and encryption at rest.
 
 ## Credits
 
