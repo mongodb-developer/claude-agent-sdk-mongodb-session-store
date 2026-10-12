@@ -18,7 +18,8 @@ from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
 from claude_agent_sdk_mongodb_session_store import MongoDBSessionStore
 
-client = AsyncMongoClient("mongodb://localhost:27017")
+uri = "mongodb://localhost:27017"  # local development. Use TLS and auth in production
+client = AsyncMongoClient(uri)
 store = MongoDBSessionStore(client=client, db_name="claude")
 await store.create_schema()  # idempotent createIndexes
 
@@ -233,14 +234,19 @@ three collections as you would any store of user conversations:
   `AsyncMongoClient` URI the caller passes in; the store never reads
   credentials itself. On Atlas, both are on by default.
 - Give the application a dedicated database user with the `readWrite` role
-  on this one database and nothing else. `create_schema()` needs
-  `createIndex`, which `readWrite` includes.
+  on this one database and nothing else.
+- Write access to these collections is equivalent to controlling what a
+  resumed session believes.
+- Don't resume sessions from a database that untrusted parties can write to.
 - Turn on encryption at rest. If plaintext transcripts must never reach the
   server, configure the `AsyncMongoClient` for automatic
   [Client-Side Field Level Encryption (CSFLE) with randomized encryption](https://www.mongodb.com/docs/manual/core/csfle/fundamentals/encryption-algorithms/)
   of the entire `entry` and `data` objects. The store never queries inside
   these payloads, so they do not need to be queryable. Keep identifiers and
   indexed metadata fields unencrypted.
+- The store doesn't authenticate callers or sign entries. The application
+  must derive project_key and session_id from an authenticated identity
+  and never take them from untrusted input.
 
 **Keys are validated before every query.** `project_key`, `session_id` and
 `subpath` are passed into MongoDB query filters. A value that is not a
