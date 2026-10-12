@@ -9,6 +9,8 @@ driver via its stable async API `pymongo.AsyncMongoClient`.
 uv add claude-agent-sdk-mongodb-session-store
 ```
 
+This requires `pymongo` 4.14 or later, which is installed as a dependency.
+
 ## Usage
 
 ```python
@@ -62,8 +64,9 @@ below the SDK's 60 s limit on each `append()`. The SDK retries a failed
 `append()` up to three times, but not one that hits its own 60 s limit,
 because the call may still land. A driver timeout (`NetworkTimeout`,
 `ExecutionTimeout`) is retried, and the entry `uuid` keeps the retry from
-storing a duplicate. `timeoutMS` applies to each driver operation, and one
-`append()` makes several, so it bounds a call but does not cap it at 20 s.
+storing a duplicate (see [Retries](#retries)). `timeoutMS` applies to each
+driver operation, and one `append()` makes several, so it bounds a call but
+does not cap it at 20 s.
 
 Writes need the primary, so appends fail during an election. The SDK drops a
 batch it cannot append and the agent run continues, but `load()` fails after
@@ -74,7 +77,9 @@ them partway; run them again to finish.
 
 ## Retries
 
-The SDK retries a failed `append()` with the same batch. Most entries carry
+The SDK retries a failed `append()` with the same batch; see
+[Client configuration](#client-configuration) for which failures it retries.
+Most entries carry
 a `uuid`, which the adapter treats as an idempotency key: an entry whose
 `uuid` is already stored in the same transcript is skipped, so a retry never
 stores it twice. The same holds when `import_session_to_store()` re-imports
@@ -85,7 +90,9 @@ stored every time, as the SDK's `SessionStore` protocol asks.
 
 Per the `SessionStore.list_session_summaries` contract, sidecar updates
 inside `append()` must be serialized when calls can race for the same
-session. The summary write is a compare-and-swap on its `rev` token, which
+session. (The sidecar is the per-session summary document; see
+[Schema](#schema) and [Why a summary sidecar?](#why-a-summary-sidecar-the-optional-list_session_summaries-method).)
+The summary write is a compare-and-swap on its `rev` token, which
 changes on every write, so appends from different processes (workers, pods)
 to the same session can't overwrite each other's summary. A writer that
 loses the race reads the summary again and rebuilds it from the stored
@@ -140,20 +147,26 @@ async for message in query(
     ...
 ```
 
+Resuming replays the stored transcript as the agent's history, so only
+resume from a database that only your application can write to. See
+[Security](#security).
+
 ## Security
 
 **Transcripts are sensitive.** Every entry is stored verbatim: user prompts,
 assistant replies, tool inputs and tool results. Tool results routinely
 include file contents, command output and environment variables, so a
 transcript can contain anything the agent saw, including credentials. The
-summary sidecar's `data` blob holds a digest of the same material. Treat the
+summary sidecar's `data` blob (a per-session summary document; see
+[Schema](#schema)) holds a digest of the same material. Treat the
 three collections as you would any store of user conversations:
 
 - Connect over TLS and authenticate. Both are configured on the
   `AsyncMongoClient` URI the caller passes in; the store never reads
   credentials itself. On Atlas, both are on by default.
 - Give the application a dedicated database user with the `readWrite` role
-  on this one database and nothing else.
+  on this one database and nothing else. `create_schema()` needs
+  `createIndex`, which `readWrite` includes.
 - Write access to these collections is equivalent to controlling what a
   resumed session believes.
 - Don't resume sessions from a database that untrusted parties can write to.
@@ -164,7 +177,7 @@ three collections as you would any store of user conversations:
   these payloads, so they do not need to be queryable. Keep identifiers and
   indexed metadata fields unencrypted.
 - The store doesn't authenticate callers or sign entries. The application
-  must derive project_key and session_id from an authenticated identity
+  must derive `project_key` and `session_id` from an authenticated identity
   and never take them from untrusted input.
 
 **Keys are validated before every query.** `project_key`, `session_id` and
