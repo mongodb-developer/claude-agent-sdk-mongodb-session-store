@@ -18,3 +18,10 @@ This release repurposes it as a standalone package and hardens it.
 - The README gains a Security section covering the sensitivity of stored
   transcripts, TLS and authentication, least-privilege database users,
   encryption at rest, and the cross-tenant scope of `delete_inactive()`.
+
+### Added
+
+- `EntryTooLargeError`, a subclass of pymongo's `DocumentTooLarge`, raised by
+  `append()` when an entry exceeds MongoDB's 16 MiB document limit. The
+  driver reports this three different ways depending on the size; the new
+  error names the session, entry `uuid` and size instead.
