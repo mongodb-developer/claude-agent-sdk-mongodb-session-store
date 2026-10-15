@@ -1,0 +1,87 @@
+name: Release setup
+description: >-
+  Assume the AWS signing role through GitHub OIDC, log in to the Garasign ECR
+  registry, and load the Garasign credentials and GPG key id from AWS Secrets
+  Manager into the environment for the sign-artifacts action.
+
+inputs:
+  aws_role_arn:
+    description: AWS IAM role (trusting this repository's OIDC subject) that can read the signing secret.
+    required: true
+  aws_region:
+    description: AWS region of the signing role and Secrets Manager secret.
+    required: true
+  aws_secret_id:
+    description: >-
+      AWS Secrets Manager secret id. Its JSON must contain garasign-username
+      and garasign-password, and gpg-key-id; gpg-public-url is optional.
+    required: true
+  ecr_registry_id:
+    description: AWS account id of the ECR registry that hosts the Garasign images.
+    default: "901841024863"
+  ecr_role_arn:
+    description: Read-only role used to pull the Garasign images from ECR.
+    default: "arn:aws:iam::901841024863:role/ecr-role-gha-ro"
+  ecr_region:
+    description: Region of the ECR registry.
+    default: us-east-1
+
+runs:
+  using: composite
+  steps:
+    # ECR login happens first so the Docker credential survives the second
+    # role assumption below.
+    - name: Assume ECR read-only role
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: ${{ inputs.ecr_role_arn }}
+        role-session-name: release-signing-ecr
+        aws-region: ${{ inputs.ecr_region }}
+
+    - name: Log in to the Garasign ECR registry
+      uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      with:
+        registries: ${{ inputs.ecr_registry_id }}
+
+    - name: Assume signing-secrets role
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+      with:
+        role-to-assume: ${{ inputs.aws_role_arn }}
+        role-session-name: release-signing-secrets
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Load signing secrets into the environment
+      uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+      with:
+        secret-ids: ${{ inputs.aws_secret_id }}
+        parse-json-secrets: true
+
+    - name: Export Garasign and GPG variables
+      shell: bash
+      env:
+        AWS_SECRET_ID: ${{ inputs.aws_secret_id }}
+      run: |
+        set -eu
+        # aws-secretsmanager-get-secrets exports each JSON key as
+        # <SECRET_ID>_<KEY>, upper-cased with "-" and "/" folded to "_".
+        # Strip that prefix so the keys become GARASIGN_USERNAME, GPG_KEY_ID, ...
+        prefix="$(echo "$AWS_SECRET_ID" | tr '[:lower:]' '[:upper:]' | sed -r 's/[-/]+/_/g')_"
+        for var in $(compgen -A variable | grep "^${prefix}" || true); do
+          declare "${var#"$prefix"}=${!var}"
+        done
+        : "${GARASIGN_USERNAME:?missing garasign-username in $AWS_SECRET_ID}"
+        : "${GARASIGN_PASSWORD:?missing garasign-password in $AWS_SECRET_ID}"
+        : "${GPG_KEY_ID:?missing gpg-key-id in $AWS_SECRET_ID}"
+
+        umask 077
+        GARASIGN_ENVFILE=/tmp/garasign-envfile
+        cat > "$GARASIGN_ENVFILE" <<ENVEOF
+        GRS_CONFIG_USER1_USERNAME=$GARASIGN_USERNAME
+        GRS_CONFIG_USER1_PASSWORD=$GARASIGN_PASSWORD
+        ENVEOF
+
+        {
+          echo "GARASIGN_ENVFILE=$GARASIGN_ENVFILE"
+          echo "GPG_KEY_ID=$GPG_KEY_ID"
+          echo "GPG_PUBLIC_URL=${GPG_PUBLIC_URL:-}"
+        } >> "$GITHUB_ENV"

@@ -1,0 +1,58 @@
+name: Sign artifacts with Garasign
+description: >-
+  Create an armored, detached GPG signature (<file>.sig) for each given file
+  using the Garasign container. Requires release-setup to have run first.
+
+inputs:
+  path:
+    description: Directory whose files should each receive a detached signature.
+    required: true
+  ecr_registry:
+    description: ECR registry that hosts the Garasign images.
+    default: "901841024863.dkr.ecr.us-east-1.amazonaws.com"
+  ecr_repository:
+    description: Garasign git image repository (it also carries gpg).
+    default: release-infrastructure/garasign-git
+
+outputs:
+  signature-path:
+    description: Directory containing the generated .sig files.
+    value: ${{ steps.sign.outputs.signature-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create detached signatures
+      id: sign
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ inputs.ecr_registry }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+      run: |
+        set -eu
+        : "${GARASIGN_ENVFILE:?run release-setup before sign-artifacts}"
+
+        files=()
+        while IFS= read -r -d '' f; do
+          files+=("$f")
+        done < <(find "$ARTIFACT_PATH" -maxdepth 1 -type f -print0)
+
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "::error::No files found in $ARTIFACT_PATH"
+          exit 1
+        fi
+
+        docker run --rm \
+          --env-file="$GARASIGN_ENVFILE" \
+          -v "$(pwd):$(pwd)" \
+          -w "$(pwd)" \
+          "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
+          /bin/bash -c "gpgloader && for f in ${files[*]}; do gpg --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
+
+        echo "signature-path=$ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
+
+        echo "### Signed artifacts" >> "$GITHUB_STEP_SUMMARY"
+        for f in "${files[@]}"; do
+          echo "- $(basename "$f") -> $(basename "$f").sig" >> "$GITHUB_STEP_SUMMARY"
+        done
