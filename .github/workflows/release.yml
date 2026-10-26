@@ -134,7 +134,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build, test-wheel]
+    needs: [build, test-wheel, sign]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
