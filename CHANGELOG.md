@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-27)
 
 First release of MongoDBSessionStore implementation Adapter for mirroring session transcripts to external storage.
 This began as a reference example in [anthropics/claude-agent-sdk-python #1014](https://github.com/anthropics/claude-agent-sdk-python/pull/1014).
 This release repurposes it as a standalone package and hardens it.
 
-### Security
+Security improvements:
 
 - Every `SessionStore` method now validates its key before any query.
   `project_key`, `session_id` and `subpath` must be strings (`TypeError`
