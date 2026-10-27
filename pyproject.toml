@@ -31,6 +31,11 @@ dependencies = [
     "pymongo>=4.14",
 ]
 
+[project.urls]
+Homepage = "https://github.com/mongodb-developer/claude-agent-sdk-mongodb-session-store"
+Changelog = "https://github.com/mongodb-developer/claude-agent-sdk-mongodb-session-store/blob/main/CHANGELOG.md"
+Issues = "https://jira.mongodb.org/projects/INTPYTHON"
+
 [tool.hatch.build.targets.wheel]
 packages = ["claude_agent_sdk_mongodb_session_store"]
 
