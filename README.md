@@ -200,6 +200,33 @@ loses the compare-and-swap or sees a duplicate, up to 16 times per call.
 Very large sessions under heavy write contention can make a single append
 expensive. Use `delete_inactive()` to keep the data set bounded.
 
+## Verifying releases
+
+Every [GitHub release](https://github.com/mongodb-developer/claude-agent-sdk-mongodb-session-store/releases)
+attaches the wheel and sdist that were published to PyPI, a detached armored
+GPG signature (`<file>.sig`) for each, and a `SHA256SUMS` file. The
+signatures are made with MongoDB's Garasign service using this key:
+
+| | |
+|---|---|
+| Key | `ai-builder-experience <packaging@mongodb.com>` |
+| Fingerprint | `6E33 09C7 3676 2845 73EC 0E52 5994 2DBC 12A6 CD89` |
+| Public key | <https://pgp.mongodb.com/ai-builder-experience.pub> |
+
+To verify a release, download the distribution and its `.sig` from the
+release page, import the key, and check the signature:
+
+```bash
+curl -sSLO https://pgp.mongodb.com/ai-builder-experience.pub
+gpg --import ai-builder-experience.pub
+gpg --verify claude_agent_sdk_mongodb_session_store-0.1.1-py3-none-any.whl.sig \
+             claude_agent_sdk_mongodb_session_store-0.1.1-py3-none-any.whl
+```
+
+Expect `Good signature from "ai-builder-experience <packaging@mongodb.com>"`
+and the fingerprint above. Compare the fingerprint against this README, not
+only against the downloaded key, so a swapped key cannot verify itself.
+
 ## Production checklist
 
 - Size the `AsyncMongoClient` connection pool for expected concurrent

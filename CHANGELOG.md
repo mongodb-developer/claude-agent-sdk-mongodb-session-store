@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0 (2026-11-27)
+## 0.1.1 (2026-10-28)
+
+Release distributions on GitHub now carry detached GPG signatures produced with
+Garasign; see [Verifying releases](README.md#verifying-releases) in the README
+for the signing key and how to verify.
+
+## 0.1.0 (2026-10-27)
 
 First release of MongoDBSessionStore implementation Adapter for mirroring session transcripts to external storage.
 This began as a reference example in [anthropics/claude-agent-sdk-python #1014](https://github.com/anthropics/claude-agent-sdk-python/pull/1014).
