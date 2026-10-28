@@ -53,7 +53,10 @@ runs:
     - name: Load signing secrets into the environment
       uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
       with:
-        secret-ids: ${{ inputs.aws_secret_id }}
+        # The blank alias (",<id>") exports each JSON key as an environment
+        # variable named after the key alone: GARASIGN_USERNAME, GPG_KEY_ID, ...
+        # with no secret-name prefix, so a name or an ARN both work.
+        secret-ids: ",${{ inputs.aws_secret_id }}"
         parse-json-secrets: true
 
     - name: Export Garasign and GPG variables
@@ -62,13 +65,6 @@ runs:
         AWS_SECRET_ID: ${{ inputs.aws_secret_id }}
       run: |
         set -eu
-        # aws-secretsmanager-get-secrets exports each JSON key as
-        # <SECRET_ID>_<KEY>, upper-cased with "-" and "/" folded to "_".
-        # Strip that prefix so the keys become GARASIGN_USERNAME, GPG_KEY_ID, ...
-        prefix="$(echo "$AWS_SECRET_ID" | tr '[:lower:]' '[:upper:]' | sed -r 's/[-/]+/_/g')_"
-        for var in $(compgen -A variable | grep "^${prefix}" || true); do
-          declare "${var#"$prefix"}=${!var}"
-        done
         : "${GARASIGN_USERNAME:?missing garasign-username in $AWS_SECRET_ID}"
         : "${GARASIGN_PASSWORD:?missing garasign-password in $AWS_SECRET_ID}"
         : "${GPG_KEY_ID:?missing gpg-key-id in $AWS_SECRET_ID}"

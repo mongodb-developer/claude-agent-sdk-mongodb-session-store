@@ -48,7 +48,12 @@ runs:
           -v "$(pwd):$(pwd)" \
           -w "$(pwd)" \
           "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
-          /bin/bash -c "gpgloader && for f in ${files[*]}; do gpg --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
+          /bin/bash -ec "gpgloader; for f in ${files[*]}; do gpg --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
+
+        # Every input must have produced a signature.
+        for f in "${files[@]}"; do
+          [ -s "$f.sig" ] || { echo "::error::No signature produced for $f"; exit 1; }
+        done
 
         echo "signature-path=$ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
 
