@@ -32,6 +32,7 @@ runs:
       run: |
         set -eu
         : "${GARASIGN_ENVFILE:?run release-setup before sign-artifacts}"
+        : "${GPG_KEY_ID:?run release-setup before sign-artifacts}"
 
         files=()
         while IFS= read -r -d '' f; do
@@ -43,12 +44,15 @@ runs:
           exit 1
         fi
 
+        # --local-user pins the signing key to the configured release key, so
+        # a Garasign account with several keys can't sign with another one.
         docker run --rm \
           --env-file="$GARASIGN_ENVFILE" \
+          -e GPG_KEY_ID \
           -v "$(pwd):$(pwd)" \
           -w "$(pwd)" \
           "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
-          /bin/bash -ec "gpgloader; for f in ${files[*]}; do gpg --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
+          /bin/bash -ec "gpgloader; for f in ${files[*]}; do gpg --local-user \"\$GPG_KEY_ID\" --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
 
         # Every input must have produced a signature.
         for f in "${files[@]}"; do

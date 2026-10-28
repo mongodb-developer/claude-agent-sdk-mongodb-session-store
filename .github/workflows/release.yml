@@ -180,4 +180,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }} # no checkout here, so gh can't infer it
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/*.whl dist/*.tar.gz dist/*.sig dist/SHA256SUMS
+        # --clobber lets a rerun replace assets left by a partially failed upload.
+        run: gh release upload --clobber "$RELEASE_TAG" dist/*.whl dist/*.tar.gz dist/*.sig dist/SHA256SUMS
