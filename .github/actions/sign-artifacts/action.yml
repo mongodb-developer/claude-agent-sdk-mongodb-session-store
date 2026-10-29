@@ -1,0 +1,62 @@
+name: Sign artifacts with Garasign
+description: >-
+  Create an armored, detached GPG signature (<file>.sig) for each given file
+  using the Garasign container. Requires release-setup to have run first.
+
+inputs:
+  path:
+    description: Directory whose files should each receive a detached signature.
+    required: true
+  ecr_registry:
+    description: ECR registry that hosts the Garasign images.
+    default: "901841024863.dkr.ecr.us-east-1.amazonaws.com"
+  ecr_repository:
+    description: Garasign git image repository (it also carries gpg).
+    default: release-infrastructure/garasign-git
+
+runs:
+  using: composite
+  steps:
+    - name: Create detached signatures
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ inputs.ecr_registry }}
+        ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+        ARTIFACT_PATH: ${{ inputs.path }}
+      run: |
+        set -eu
+        envfile="$RUNNER_TEMP/garasign.env"
+        [ -s "$envfile" ] || { echo "::error::$envfile is missing; run release-setup before sign-artifacts"; exit 1; }
+        : "${GPG_KEY_ID:?run release-setup before sign-artifacts}"
+
+        files=()
+        while IFS= read -r -d '' f; do
+          files+=("$f")
+        done < <(find "$ARTIFACT_PATH" -maxdepth 1 -type f -print0)
+
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "::error::No files found in $ARTIFACT_PATH"
+          exit 1
+        fi
+
+        # --local-user pins the signing key to the configured release key, so
+        # a Garasign account with several keys can't sign with another one.
+        # The file list goes over stdin as NUL-delimited data: interpolating
+        # filenames into the command string would word-split on whitespace.
+        printf '%s\0' "${files[@]}" | docker run --rm -i \
+          --env-file="$envfile" \
+          -e GPG_KEY_ID \
+          -v "$(pwd):$(pwd)" \
+          -w "$(pwd)" \
+          "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
+          /bin/bash -ec 'gpgloader </dev/null; while IFS= read -r -d "" f; do gpg --local-user "$GPG_KEY_ID" --detach-sign --armor --output "$f.sig" "$f"; done'
+
+        # Every input must have produced a signature.
+        for f in "${files[@]}"; do
+          [ -s "$f.sig" ] || { echo "::error::No signature produced for $f"; exit 1; }
+        done
+
+        echo "### Signed artifacts" >> "$GITHUB_STEP_SUMMARY"
+        for f in "${files[@]}"; do
+          echo "- $(basename "$f") -> $(basename "$f").sig" >> "$GITHUB_STEP_SUMMARY"
+        done
