@@ -13,8 +13,8 @@ inputs:
     required: true
   aws_secret_id:
     description: >-
-      AWS Secrets Manager secret id. Its JSON must contain garasign-username
-      and garasign-password, and gpg-key-id; gpg-public-url is optional.
+      AWS Secrets Manager secret name or ARN. Its JSON must contain
+      garasign-username, garasign-password and gpg-key-id.
     required: true
   ecr_registry_id:
     description: AWS account id of the ECR registry that hosts the Garasign images.
@@ -29,6 +29,21 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate secret id
+      shell: bash
+      env:
+        AWS_SECRET_ID: ${{ inputs.aws_secret_id }}
+      run: |
+        set -eu
+        # The secrets action reads "alias,id"; a comma in the id would be
+        # taken as that separator.
+        case "$AWS_SECRET_ID" in
+          *,*)
+            echo "::error::aws_secret_id contains a comma, which the secrets action parses as an alias separator"
+            exit 1
+          ;;
+        esac
+
     # ECR login happens first so the Docker credential survives the second
     # role assumption below.
     - name: Assume ECR read-only role
@@ -59,7 +74,7 @@ runs:
         secret-ids: ",${{ inputs.aws_secret_id }}"
         parse-json-secrets: true
 
-    - name: Export Garasign and GPG variables
+    - name: Write the Garasign env file
       shell: bash
       env:
         AWS_SECRET_ID: ${{ inputs.aws_secret_id }}
@@ -69,15 +84,22 @@ runs:
         : "${GARASIGN_PASSWORD:?missing garasign-password in $AWS_SECRET_ID}"
         : "${GPG_KEY_ID:?missing gpg-key-id in $AWS_SECRET_ID}"
 
+        # docker --env-file takes each line as KEY=VALUE with no quoting and
+        # no escapes. A newline inside a credential would add a stray line to
+        # the file and the auth failure would point at the wrong cause. Fail
+        # here, with the real one.
+        for v in GARASIGN_USERNAME GARASIGN_PASSWORD; do
+          case "${!v}" in
+            *$'\n'*|*$'\r'*)
+              echo "::error::$v contains a newline and cannot be written to the Garasign env file"
+              exit 1
+            ;;
+          esac
+        done
+
+        # sign-artifacts reads this file from the same fixed location.
         umask 077
-        GARASIGN_ENVFILE=/tmp/garasign-envfile
-        cat > "$GARASIGN_ENVFILE" <<ENVEOF
+        cat > "$RUNNER_TEMP/garasign.env" <<ENVEOF
         GRS_CONFIG_USER1_USERNAME=$GARASIGN_USERNAME
         GRS_CONFIG_USER1_PASSWORD=$GARASIGN_PASSWORD
         ENVEOF
-
-        {
-          echo "GARASIGN_ENVFILE=$GARASIGN_ENVFILE"
-          echo "GPG_KEY_ID=$GPG_KEY_ID"
-          echo "GPG_PUBLIC_URL=${GPG_PUBLIC_URL:-}"
-        } >> "$GITHUB_ENV"

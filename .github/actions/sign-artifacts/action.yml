@@ -14,16 +14,10 @@ inputs:
     description: Garasign git image repository (it also carries gpg).
     default: release-infrastructure/garasign-git
 
-outputs:
-  signature-path:
-    description: Directory containing the generated .sig files.
-    value: ${{ steps.sign.outputs.signature-path }}
-
 runs:
   using: composite
   steps:
     - name: Create detached signatures
-      id: sign
       shell: bash
       env:
         ECR_REGISTRY: ${{ inputs.ecr_registry }}
@@ -31,7 +25,8 @@ runs:
         ARTIFACT_PATH: ${{ inputs.path }}
       run: |
         set -eu
-        : "${GARASIGN_ENVFILE:?run release-setup before sign-artifacts}"
+        envfile="$RUNNER_TEMP/garasign.env"
+        [ -s "$envfile" ] || { echo "::error::$envfile is missing; run release-setup before sign-artifacts"; exit 1; }
         : "${GPG_KEY_ID:?run release-setup before sign-artifacts}"
 
         files=()
@@ -46,20 +41,20 @@ runs:
 
         # --local-user pins the signing key to the configured release key, so
         # a Garasign account with several keys can't sign with another one.
-        docker run --rm \
-          --env-file="$GARASIGN_ENVFILE" \
+        # The file list goes over stdin as NUL-delimited data: interpolating
+        # filenames into the command string would word-split on whitespace.
+        printf '%s\0' "${files[@]}" | docker run --rm -i \
+          --env-file="$envfile" \
           -e GPG_KEY_ID \
           -v "$(pwd):$(pwd)" \
           -w "$(pwd)" \
           "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
-          /bin/bash -ec "gpgloader; for f in ${files[*]}; do gpg --local-user \"\$GPG_KEY_ID\" --detach-sign --armor --output \"\$f.sig\" \"\$f\"; done"
+          /bin/bash -ec 'gpgloader </dev/null; while IFS= read -r -d "" f; do gpg --local-user "$GPG_KEY_ID" --detach-sign --armor --output "$f.sig" "$f"; done'
 
         # Every input must have produced a signature.
         for f in "${files[@]}"; do
           [ -s "$f.sig" ] || { echo "::error::No signature produced for $f"; exit 1; }
         done
-
-        echo "signature-path=$ARTIFACT_PATH" >> "$GITHUB_OUTPUT"
 
         echo "### Signed artifacts" >> "$GITHUB_STEP_SUMMARY"
         for f in "${files[@]}"; do
