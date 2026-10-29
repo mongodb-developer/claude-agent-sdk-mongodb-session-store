@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (2026-10-28)
+## 0.1.1 (2026-10-29)
 
 Release distributions on GitHub now carry detached GPG signatures produced with
 Garasign; see [Verifying releases](README.md#verifying-releases) in the README
