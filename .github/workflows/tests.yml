@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -70,14 +70,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv and Python ${{ matrix.python_version }}
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: ${{ matrix.python_version }}
           enable-cache: true
 
       - name: Start MongoDB ${{ matrix.mongodb_version }}
         id: mongodb
-        uses: mongodb-labs/drivers-evergreen-tools@ec0b1497b3d351acbfc4fd7579bf3de4de0a1046 # v1.1.0
+        uses: mongodb-labs/drivers-evergreen-tools@f33b31d5ce6c444c698dba95077c1c088776a870 # v1.3.0
         with:
           version: ${{ matrix.mongodb_version }}
 
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload HTML coverage report
         if: always() && matrix.deps == 'current'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: html-coverage-report
           path: htmlcov/
@@ -151,14 +151,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv and Python 3.14
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.14"
           enable-cache: true
 
       - name: Start MongoDB 9.0
         id: mongodb
-        uses: mongodb-labs/drivers-evergreen-tools@ec0b1497b3d351acbfc4fd7579bf3de4de0a1046 # v1.1.0
+        uses: mongodb-labs/drivers-evergreen-tools@f33b31d5ce6c444c698dba95077c1c088776a870 # v1.3.0
         with:
           version: "9.0"
 
