@@ -86,6 +86,13 @@ stores it twice. The same holds when `import_session_to_store()` re-imports
 a session. Entries without a `uuid` (titles, tags, mode markers) are
 stored every time, as the SDK's `SessionStore` protocol asks.
 
+An entry too large for a MongoDB document (16 MiB) can never be stored, so
+retrying cannot help. `append()` raises `EntryTooLargeError`, a subclass of
+pymongo's `DocumentTooLarge`, naming the session, the entry's `uuid` and its
+size. The SDK then drops the batch after its retries. Depending on how far
+over the limit the entry is, the other entries in the batch may or may not
+have been stored; the session summary is rebuilt on the next append.
+
 ## Concurrency
 
 Per the `SessionStore.list_session_summaries` contract, sidecar updates

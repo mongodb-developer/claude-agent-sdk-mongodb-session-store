@@ -108,7 +108,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from bson import ObjectId
+from bson import ObjectId, encode
 from claude_agent_sdk import (
     SessionKey,
     SessionListSubkeysKey,
@@ -120,7 +120,13 @@ from claude_agent_sdk import (
 )
 from pymongo import ReturnDocument
 from pymongo.driver_info import DriverInfo
-from pymongo.errors import BulkWriteError, DuplicateKeyError, InvalidName
+from pymongo.errors import (
+    BulkWriteError,
+    DocumentTooLarge,
+    DuplicateKeyError,
+    InvalidName,
+    OperationFailure,
+)
 
 from ._version import __version__
 
@@ -141,6 +147,22 @@ _DRIVER_INFO = DriverInfo(name="claude-sdk-sessionstore", version=__version__)
 #: How many times ``append()`` re-reads and retries the summary write when
 #: another writer changed the summary in between.
 _SUMMARY_WRITE_ATTEMPTS = 16
+
+#: MongoDB's maximum BSON document size.
+_MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+
+
+class EntryTooLargeError(DocumentTooLarge):
+    """A transcript entry does not fit in a MongoDB document (16 MiB).
+
+    A subclass of pymongo's ``DocumentTooLarge``, so existing handlers for it
+    still apply.
+
+    Raised by ``append()`` instead of the driver's own error, which does not
+    say which session or entry was too large. The failure is permanent, so
+    retrying the same batch cannot succeed. Entries stored from the batch
+    before the failure stay stored; the others are not.
+    """
 
 
 def _require_str(label: str, value: object) -> str:
@@ -332,6 +354,24 @@ class MongoDBSessionStore(SessionStore):
         assert doc is not None  # For typing. upsert=True with AFTER never returns None.
         return int(doc["last_position"]) - n + 1
 
+    @staticmethod
+    def _raise_if_oversized(docs: list[dict[str, Any]], cause: Exception) -> None:
+        """Raise ``EntryTooLargeError`` if the failed insert held a document
+        over the 16 MiB limit. Measured here, after the failure, because the
+        server and driver report it differently depending on the size: a
+        ``BulkWriteError``, an ``OperationFailure`` (code 10334) or
+        ``DocumentTooLarge``."""
+        size, doc = max(((len(encode(d)), d) for d in docs), key=lambda t: t[0])
+        if size <= _MAX_DOCUMENT_BYTES:
+            return
+        raise EntryTooLargeError(
+            f"transcript entry (uuid={doc['entry'].get('uuid')!r}, position "
+            f"{doc['position']}, {size} bytes encoded) for session "
+            f"{doc['session_id']!r} in project {doc['project_key']!r}, "
+            f"subpath {doc['subpath']!r}, exceeds MongoDB's 16 MiB document "
+            f"limit; the batch of {len(docs)} entries was not fully stored"
+        ) from cause
+
     async def _insert_new(self, docs: list[dict[str, Any]]) -> bool:
         """Insert ``docs``, skipping any whose ``uuid`` is already stored in
         the same transcript. Returns whether none were skipped.
@@ -348,8 +388,12 @@ class MongoDBSessionStore(SessionStore):
                 err["code"] == 11000 and "uuid" in err.get("keyPattern", {})
                 for err in errors
             ):
+                self._raise_if_oversized(docs, e)
                 raise
             return False
+        except (DocumentTooLarge, OperationFailure) as e:
+            self._raise_if_oversized(docs, e)
+            raise
         return True
 
     async def _update_summary(
